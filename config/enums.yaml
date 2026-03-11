@@ -1,0 +1,111 @@
+# Enumeration Values for Policy Recommendation Classification
+
+# Policy Instrument Types
+instrument_types:
+  - "regulation"      # Laws, rules, standards
+  - "subsidy"         # Financial incentives, grants, payments
+  - "tax"            # Taxes, fees, charges
+  - "information"    # Education, awareness, disclosure
+  - "voluntary"      # Voluntary agreements, self-regulation
+  - "planning"       # Spatial planning, zoning, management plans
+  - "monitoring"     # Monitoring, reporting, verification systems
+  - "research"       # R&D funding, research programs
+  - "procurement"    # Public procurement policies
+  - "infrastructure" # Public infrastructure investment
+  - "institutional"  # Institutional reforms, governance changes
+  - "other"          # Catch-all for unclassified instruments
+
+# Policy Domains
+policy_domains:
+  - "climate_change"
+  - "biodiversity"
+  - "forest_management"
+  - "agriculture"
+  - "energy"
+  - "transportation"
+  - "urban_planning"
+  - "water_management"
+  - "waste_management"
+  - "industrial_policy"
+  - "trade"
+  - "finance"
+  - "education"
+  - "health" 
+  - "social_policy"
+  - "governance"
+  - "international_cooperation"
+  - "cross_sectoral"
+  - "other"
+
+# Geographic Scopes
+geographic_scopes:
+  - "local"
+  - "regional"
+  - "national"
+  - "international"
+  - "global"
+  - "eu"
+  - "bilateral"
+  - "multilateral"
+  - "subnational"
+  - "transboundary"
+  - "unspecified"
+
+# Timeframes
+timeframes:
+  - "immediate"      # < 1 year
+  - "short_term"     # 1-3 years
+  - "medium_term"    # 3-10 years 
+  - "long_term"      # > 10 years
+  - "ongoing"        # Continuous process
+  - "unspecified"    # No clear timeframe
+
+# Recommendation Strength/Urgency
+strengths:
+  - "must"           # Strong obligation (regulatory language)
+  - "should"         # Strong recommendation
+  - "could"          # Option/possibility
+  - "may"            # Weak suggestion
+  - "consider"       # For consideration
+  - "unspecified"    # No clear strength indicator
+
+# Actor Types (who should implement)
+actor_types:
+  - "government"
+  - "eu_institutions"
+  - "international_organizations"
+  - "private_sector"
+  - "civil_society"
+  - "research_institutions"
+  - "individuals"
+  - "multiple_actors"
+  - "unspecified"
+
+# Action Types (high-level categorization of actions)
+action_types:
+  - "develop"        # Create, design, establish
+  - "implement"      # Execute, deploy, operationalize
+  - "strengthen"     # Enhance, improve, expand
+  - "coordinate"     # Collaborate, align, cooperate
+  - "monitor"        # Track, evaluate, assess
+  - "fund"           # Finance, invest, support financially
+  - "regulate"       # Control, mandate, restrict
+  - "promote"        # Encourage, facilitate, support
+  - "reform"         # Change, restructure, transform
+  - "research"       # Study, investigate, analyze
+  - "communicate"    # Inform, educate, raise awareness
+  - "other"
+
+# Recommendation Categories (thematic grouping)
+recommendation_categories:
+  - "institutional_reform"
+  - "financial_mechanisms"
+  - "regulatory_framework"
+  - "capacity_building"
+  - "knowledge_management"
+  - "stakeholder_engagement"
+  - "monitoring_evaluation"
+  - "international_cooperation"
+  - "innovation_technology"
+  - "cross_sectoral_coordination"
+  - "other"

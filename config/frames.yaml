@@ -1,0 +1,193 @@
+# Theoretical Frames Configuration
+# Define the closed vocabulary of theoretical frameworks to detect in policy briefs
+
+frames:
+  
+  - id: "market_based_instruments"
+    label: "Market-Based Instruments"
+    short_definition: "Policies that use market mechanisms and economic incentives to achieve policy goals"
+    inclusion_cues:
+      - "carbon pricing"
+      - "cap and trade" 
+      - "emissions trading"
+      - "carbon tax"
+      - "environmental tax"
+      - "price signal"
+      - "market mechanism"
+      - "economic incentive"
+      - "payment for ecosystem services"
+      - "PES"
+      - "carbon credit"
+      - "offset"
+      - "carbon market"
+    exclusion_cues:
+      - "command and control"
+      - "direct regulation"
+      - "mandatory standard"
+    must_have:
+      - ["market", "price", "economic"]
+      - ["incentive", "mechanism", "instrument"]
+    
+  - id: "regulatory_approach"
+    label: "Regulatory Approach" 
+    short_definition: "Traditional command-and-control regulatory instruments"
+    inclusion_cues:
+      - "regulation"
+      - "standard"
+      - "mandate"
+      - "requirement"
+      - "compliance"
+      - "enforcement"
+      - "penalty"
+      - "ban"
+      - "prohibition"
+      - "permitting"
+      - "licensing"
+      - "command and control"
+    exclusion_cues:
+      - "voluntary"
+      - "market-based"
+      - "incentive"
+    must_have:
+      - ["regulation", "standard", "mandate"]
+      - ["compliance", "enforcement", "requirement"]
+
+  - id: "participatory_governance"
+    label: "Participatory Governance"
+    short_definition: "Approaches emphasizing stakeholder participation and collaborative governance"
+    inclusion_cues:
+      - "stakeholder engagement"
+      - "participation"
+      - "collaborative governance"
+      - "co-management"
+      - "multi-stakeholder"
+      - "inclusive"
+      - "deliberative"
+      - "consensus"
+      - "consultation"
+      - "community involvement"
+      - "civil society"
+      - "bottom-up"
+    exclusion_cues:
+      - "top-down"
+      - "centralized"
+      - "technocratic"
+    must_have:
+      - ["stakeholder", "participation", "collaborative"]
+      - ["engagement", "involvement", "inclusive"]
+
+  - id: "adaptive_management"
+    label: "Adaptive Management"
+    short_definition: "Management approaches that emphasize learning, flexibility, and iterative adjustment"
+    inclusion_cues:
+      - "adaptive management"
+      - "learning by doing"
+      - "iterative"
+      - "flexibility"
+      - "monitoring and evaluation"
+      - "feedback loop"
+      - "adjustment"
+      - "experimentation"
+      - "pilot project"
+      - "trial and error"
+      - "continuous improvement"
+      - "evidence-based"
+    exclusion_cues:
+      - "rigid"
+      - "fixed"
+      - "predetermined"
+    must_have:
+      - ["adaptive", "flexible", "iterative"]
+      - ["learning", "monitoring", "feedback"]
+
+  - id: "ecosystem_services"
+    label: "Ecosystem Services Framework"
+    short_definition: "Approaches that explicitly value and manage ecosystem services"
+    inclusion_cues:
+      - "ecosystem services"
+      - "natural capital"
+      - "biodiversity"
+      - "ecosystem function"
+      - "provisioning services"
+      - "regulating services"
+      - "cultural services"
+      - "supporting services"
+      - "ecosystem valuation"
+      - "green infrastructure"
+      - "nature-based solutions"
+      - "NbS"
+    exclusion_cues:
+      - "purely technological"
+      - "engineered solution"
+    must_have:
+      - ["ecosystem", "natural", "biodiversity"]
+      - ["services", "capital", "function"]
+
+  - id: "precautionary_principle"
+    label: "Precautionary Principle"
+    short_definition: "Policy approaches emphasizing caution in the face of uncertainty"
+    inclusion_cues:
+      - "precautionary principle"
+      - "precaution"
+      - "uncertainty"
+      - "risk aversion"
+      - "safety first"
+      - "better safe than sorry"
+      - "preventive action"
+      - "burden of proof"
+      - "scientific uncertainty"
+      - "irreversible harm"
+    exclusion_cues:
+      - "risk-taking"
+      - "innovation first"
+      - "economic priority"
+    must_have:
+      - ["precautionary", "precaution", "uncertainty"]
+      - ["risk", "prevention", "safety"]
+
+  - id: "innovation_systems"
+    label: "Innovation Systems"
+    short_definition: "Policies focused on fostering innovation networks and technological development"
+    inclusion_cues:
+      - "innovation system"
+      - "research and development"
+      - "R&D"
+      - "technology transfer"
+      - "knowledge sharing"
+      - "innovation network"
+      - "cluster"
+      - "entrepreneur"
+      - "startup"
+      - "venture capital"
+      - "patent"
+      - "intellectual property"
+      - "technological change"
+    exclusion_cues:
+      - "traditional methods"
+      - "status quo"
+    must_have:
+      - ["innovation", "research", "technology"]
+      - ["development", "knowledge", "network"]
+
+  - id: "multilevel_governance"
+    label: "Multilevel Governance"
+    short_definition: "Governance approaches spanning multiple jurisdictional levels"
+    inclusion_cues:
+      - "multilevel governance"
+      - "multi-level"
+      - "subsidiarity"
+      - "federalism"
+      - "decentralization"
+      - "local government"
+      - "regional authority"
+      - "national policy"
+      - "international cooperation"
+      - "jurisdictional"
+      - "intergovernmental"
+      - "cross-border"
+    exclusion_cues:
+      - "single level"
+      - "centralized only"
+    must_have:
+      - ["multilevel", "multi-level", "jurisdictional"]
+      - ["governance", "cooperation", "coordination"]

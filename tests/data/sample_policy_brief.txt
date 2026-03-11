@@ -1,0 +1,19 @@
+# Sample Policy Brief Text
+
+This is sample text extracted from a policy brief for testing purposes.
+
+## Introduction
+
+Climate change represents one of the most pressing challenges of our time. Market-based instruments have emerged as a key policy tool for addressing environmental challenges. Carbon pricing mechanisms, including cap and trade systems, have shown promise in reducing greenhouse gas emissions while maintaining economic efficiency.
+
+## Policy Recommendations
+
+The government should implement comprehensive carbon pricing policies to address climate change. This recommendation is supported by extensive research showing that carbon tax mechanisms can effectively reduce emissions while generating revenue for green investments.
+
+International cooperation is essential for addressing global environmental challenges. Countries must develop coordinated approaches to environmental governance that incorporate both regulatory frameworks and market-based solutions.
+
+## Conclusion
+
+The evidence suggests that a combination of regulatory approaches and economic incentives provides the most effective path forward for environmental policy. Stakeholder engagement and adaptive management principles should guide implementation efforts.
+
+Policy makers need to ensure that environmental policies are designed with appropriate monitoring and evaluation mechanisms. The precautionary principle should inform decision-making when scientific uncertainty exists regarding potential environmental impacts.

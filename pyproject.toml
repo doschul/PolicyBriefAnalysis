@@ -1,0 +1,89 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "policybrief-analysis"
+version = "0.1.0"
+description = "Reproducible research pipeline for policy brief PDF analysis"
+authors = [
+    {name = "PolicyBrief Analysis Team", email = "research@example.com"}
+]
+readme = "README.md"
+requires-python = ">=3.11"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "openai>=1.12.0",
+    "pydantic>=2.6.0",
+    "pypdf>=4.0.0",
+    "pymupdf>=1.23.0",  # fitz for better PDF extraction
+    "pandas>=2.0.0",
+    "pyarrow>=15.0.0",  # For parquet support
+    "pyyaml>=6.0.0",
+    "click>=8.1.0",
+    "tqdm>=4.66.0",
+    "python-multipart>=0.0.6",
+    "textstat>=0.7.3",  # For text metrics
+    "spacy>=3.7.0",  # For linguistic analysis
+    "nltk>=3.8.0",  # Additional text processing
+    "tenacity>=8.2.0",  # For retry logic
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.8.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/example/policybrief-analysis"
+Repository = "https://github.com/example/policybrief-analysis.git"
+Issues = "https://github.com/example/policybrief-analysis/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 88
+target-version = ['py311']
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "ANN", "S", "B", "A", "COM", "DTZ", "EM", "G", "PIE", "T20", "SIM", "ARG", "PTH", "ERA", "PL", "RUF"]
+ignore = ["ANN101", "ANN102", "S101", "COM812", "PLR0913"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "--cov=src --cov-report=term-missing --cov-report=html"

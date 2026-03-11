@@ -1,0 +1,111 @@
+# Main Pipeline Configuration
+
+# OpenAI API Settings
+openai:
+  model: "gpt-4o-mini"  # Must support structured outputs
+  temperature: 0.1
+  max_tokens: 4000
+  timeout: 60
+  max_retries: 5
+  retry_delay: 2.0
+
+# PDF Processing Settings  
+pdf:
+  # Extract method: "pypdf" or "pymupdf"
+  extract_method: "pymupdf"
+  # Preserve layout information
+  preserve_layout: true
+  # OCR for scanned PDFs (requires tesseract)
+  ocr_enabled: false
+  # Max pages to process (0 = no limit)
+  max_pages: 0
+  # Skip PDFs larger than this (MB)
+  max_file_size_mb: 50
+
+# Text Processing
+text:
+  # Minimum document length (chars) to process
+  min_document_length: 1000
+  # Languages to support (affects spacy model)
+  languages: ["en"]
+  # Remove headers/footers (basic heuristics)
+  clean_headers_footers: true
+
+# Frame Detection Settings
+frames:
+  # Minimum confidence threshold for "present" classification
+  min_confidence: 0.7
+  # Maximum text spans to send to LLM per frame
+  max_spans_per_frame: 5
+  # Context window around keyword matches (chars)
+  context_window: 500
+  # Minimum evidence quotes required for "present"
+  min_evidence_quotes: 1
+  # Maximum evidence quotes to extract per frame
+  max_evidence_quotes: 3
+
+# Recommendation Extraction
+recommendations:
+  # Minimum confidence for extraction
+  min_confidence: 0.6
+  # Keywords that signal recommendations
+  recommendation_signals:
+    - "recommend"
+    - "should"
+    - "must" 
+    - "need to"
+    - "ought to"
+    - "propose"
+    - "suggest"
+    - "call for"
+    - "urge"
+    - "require"
+  # Sections likely to contain recommendations
+  target_sections:
+    - "recommendation"
+    - "conclusion"
+    - "summary"
+    - "policy implication"
+    - "next step"
+    - "action"
+
+# Processing Settings
+processing:
+  # Maximum concurrent processing threads
+  max_workers: 1
+  # Chunk size for batch processing
+  batch_size: 10
+  # Enable incremental processing (skip unchanged files)
+  incremental: true
+  # Hash algorithm for file change detection
+  hash_algorithm: "sha256"
+
+# Output Settings
+output:
+  # Formats to generate: csv, parquet, json
+  formats: ["csv", "parquet", "json"]
+  # Enable audit trail generation 
+  generate_audit: true
+  # Compress JSON outputs
+  compress_json: true
+  # Include raw text in audit files
+  include_raw_text: false
+
+# Validation Settings
+validation:
+  # Validate quotes are verbatim substrings
+  verify_quotes: true
+  # Maximum quote length (chars)
+  max_quote_length: 500
+  # Minimum quote length (chars)  
+  min_quote_length: 20
+  # Schema validation strictness
+  strict_schema: true
+
+# Logging
+logging:
+  level: "INFO"
+  file: "pipeline.log"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  max_file_size_mb: 10
+  backup_count: 5
