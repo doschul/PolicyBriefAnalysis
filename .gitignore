@@ -130,7 +130,7 @@ dmypy.json
 
 # Policy Brief Analysis Pipeline specific
 out/
-output/
+output/audit/
 results/
 temp/
 *.log
@@ -141,6 +141,7 @@ temp/
 
 # Input data (don't commit large PDFs and datasets)
 pdfs/
+data/
 data/pdfs/
 data/policy_briefs/
 data/policy_test/
