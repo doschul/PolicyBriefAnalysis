@@ -92,7 +92,8 @@ class PDFExtractor:
                 "total_pages": total_pages,
                 "pages_processed": min(total_pages, max_pages),
                 "likely_scanned": False,
-                "text_extraction_quality": 1.0
+                "text_extraction_quality": 1.0,
+                "layout_lines": [],
             }
             
             # Track scanned document detection
@@ -105,6 +106,10 @@ class PDFExtractor:
                     # Get text with layout info
                     text = page.get_text("dict")
                     page_text = self._process_fitz_layout(text)
+                    # Collect per-line layout features for section segmentation
+                    extraction_info["layout_lines"].extend(
+                        self._extract_line_features(text, page_num + 1)
+                    )
                 else:
                     # Simple text extraction
                     page_text = page.get_text()
@@ -210,7 +215,36 @@ class PDFExtractor:
                         lines.append(line_text.strip())
             
         return "\n".join(lines)
-    
+
+    @staticmethod
+    def _extract_line_features(text_dict: Dict, page_num: int) -> List[Dict]:
+        """Extract per-line layout features from a fitz text dict.
+
+        Returns list of dicts with keys: page_num, text, font_size, is_bold.
+        """
+        features: List[Dict] = []
+        for block in text_dict.get("blocks", []):
+            if "lines" not in block:
+                continue
+            for line in block["lines"]:
+                spans = line.get("spans", [])
+                if not spans:
+                    continue
+                line_text = "".join(s.get("text", "") for s in spans).strip()
+                if not line_text:
+                    continue
+                # Use the max font size across spans in the line
+                max_size = max((s.get("size", 0) for s in spans), default=0)
+                # Bold if any span's font name contains "Bold" (common convention)
+                is_bold = any("bold" in (s.get("font", "") or "").lower() for s in spans)
+                features.append({
+                    "page_num": page_num,
+                    "text": line_text,
+                    "font_size": round(max_size, 1),
+                    "is_bold": is_bold,
+                })
+        return features
+
     def _extract_fitz_metadata(self, doc) -> PDFMetadata:
         """Extract metadata using PyMuPDF."""
         meta = doc.metadata

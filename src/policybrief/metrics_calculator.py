@@ -217,7 +217,7 @@ class MetricsCalculator:
         
         try:
             # Textstat requires reasonable length text
-            fk_grade = textstat.flesch_kincaid().grade(text)
+            fk_grade = textstat.flesch_kincaid_grade(text)
             fk_ease = textstat.flesch_reading_ease(text)
             
             # Validate results (textstat can return weird values)

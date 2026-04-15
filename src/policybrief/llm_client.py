@@ -76,6 +76,50 @@ class LLMClient:
         ]
         return any(supported in model for supported in supported_models)
     
+    @staticmethod
+    def _patch_schema_required(schema: Dict[str, Any]) -> None:
+        """Make a Pydantic V2 JSON schema compatible with OpenAI strict mode.
+        
+        OpenAI structured outputs require:
+        1. Every object lists ALL properties in ``required``.
+        2. Every object has ``additionalProperties: false``.
+        3. ``$ref`` nodes carry no sibling keywords (e.g. ``description``).
+        
+        This method mutates *schema* in place, recursing into ``$defs``,
+        ``properties``, ``items``, and ``anyOf``/``allOf`` branches.
+        """
+        if not isinstance(schema, dict):
+            return
+
+        # --- inline $defs first so they are patched too ---
+        for def_schema in schema.get("$defs", {}).values():
+            LLMClient._patch_schema_required(def_schema)
+
+        # --- fix $ref siblings ---
+        if "$ref" in schema:
+            # OpenAI forbids any sibling keys next to $ref
+            for extra_key in list(schema.keys()):
+                if extra_key not in ("$ref",):
+                    del schema[extra_key]
+            return  # nothing else to do on a $ref node
+
+        # --- ensure all properties are required ---
+        if "properties" in schema:
+            schema["required"] = list(schema["properties"].keys())
+            schema["additionalProperties"] = False
+            for prop_schema in schema["properties"].values():
+                LLMClient._patch_schema_required(prop_schema)
+
+        # --- recurse into container keywords ---
+        for key in ("items", "additionalProperties"):
+            if isinstance(schema.get(key), dict):
+                LLMClient._patch_schema_required(schema[key])
+
+        for key in ("anyOf", "allOf", "oneOf"):
+            for sub in schema.get(key, []):
+                if isinstance(sub, dict):
+                    LLMClient._patch_schema_required(sub)
+    
     @retry(
         retry=retry_if_exception_type((
             openai.RateLimitError,
@@ -143,6 +187,12 @@ class LLMClient:
         """
         # Generate JSON schema from Pydantic model
         json_schema = response_model.model_json_schema()
+        
+        # OpenAI structured outputs require ALL properties in 'required'
+        # and use {"anyOf": [{"type": "string"}, {"type": "null"}]} for
+        # nullable fields.  Pydantic V2 may omit optional fields from
+        # 'required', so we patch the schema recursively.
+        self._patch_schema_required(json_schema)
         
         response_format = {
             "type": "json_schema",
@@ -216,23 +266,37 @@ class LLMClient:
                 spans_text += f"Section: {span['section_heading']}\n"
             spans_text += f"{span.get('text', '')}\n"
         
-        system_message = """You are a policy analysis expert tasked with detecting theoretical frameworks in policy documents. 
+        system_message = """You are a policy-instrument analyst classifying governance mechanisms in forest-policy documents.
 
-Your job is to determine if a specific theoretical frame is present in the given text spans.
+Your job is to determine if a SPECIFIC policy-instrument category is present in the given text spans.  The typology is rooted in smart regulation / regulatory pluralism and contains five categories:
+
+1. Command-and-Control — legally binding rules, permits, bans, zoning, sanctions, enforcement
+2. Economic Instruments — financial incentives: PES, subsidies, credits, carbon markets, offsets
+3. Self-Regulation — collective industry norms: certification (FSC/PEFC), codes of practice, sectoral standards
+4. Voluntarism — unilateral non-binding commitments: corporate pledges, individual company actions
+5. Information Strategies — transparency, disclosure, traceability, reporting, monitoring as governance tools
+
+CRITICAL DISTINCTIONS:
+- Self-regulation vs voluntarism: self-regulation = collective/sector-wide standards (e.g. FSC certification as a market-governance scheme); voluntarism = individual firm pledges without collective enforcement.
+- Command-and-control vs information: monitoring tied to LEGAL compliance → command-and-control; monitoring for TRANSPARENCY without binding compulsion → information strategies.
+- Economic instruments vs command-and-control: financial incentives, transfers, credits belong with economic instruments even if government-funded.  The driver is financial incentive, not legal compulsion.
+- Certification: classify under self-regulation when presented as collective market governance; do NOT auto-classify individual company certification as self-regulation without collective framing.
+- Research/evidence: classify under information strategies ONLY when the text presents knowledge/data as a governance mechanism — NOT for ordinary academic citations or background evidence.
 
 INSTRUCTIONS:
-1. Read the frame definition carefully
-2. Analyze the provided text spans for evidence of the frame
-3. Return your assessment using ONLY the requested JSON format
-4. For 'present' decisions, you MUST provide exact verbatim quotes as evidence
-5. Quotes must be exact substrings from the provided text
-6. Include page numbers with all evidence quotes
-7. Be conservative - only mark as 'present' if there is clear, strong evidence
+1. Read the frame definition and analytical guidance carefully.
+2. Analyze the provided text spans for evidence of the specific instrument category.
+3. Return your assessment using ONLY the requested JSON format.
+4. For 'present' decisions, you MUST provide exact verbatim quotes as evidence.
+5. Quotes must be exact substrings from the provided text.
+6. Include page numbers with all evidence quotes.
+7. Be conservative: only mark as 'present' if there is clear, functionally meaningful evidence of the instrument category.
+8. Do NOT infer instrument presence from broad governance rhetoric, general environmental language, or goals/outcomes.  Look for specific instruments, mechanisms, or tools.
 
 DECISION CRITERIA:
-- present: Clear, strong evidence with multiple supporting quotes
-- absent: No meaningful evidence found
-- insufficient_evidence: Some weak indicators but not enough for confident assessment"""
+- present: Clear evidence of a specific policy instrument with functional detail (not just keyword occurrence)
+- absent: No meaningful evidence of the instrument category
+- insufficient_evidence: Some weak indicators but not enough for confident classification"""
         
         user_message = f"""FRAME TO DETECT: {frame_input.frame_id}
 

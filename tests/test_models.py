@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from src.policybrief.models import (
     Evidence,
     DocumentMetrics,
+    DocumentFrontMatter,
     FrameAssessment,
     PolicyRecommendation,
     PerDocumentExtraction,
@@ -31,26 +32,18 @@ class TestEvidence:
         """Test valid evidence creation."""
         evidence = Evidence(
             page=1,
-            section_heading="Introduction",
-            quote="This is a valid quote with sufficient length.",
-            start_char=100,
-            end_char=150
+            quote="This is a valid quote with sufficient length."
         )
         
         assert evidence.page == 1
-        assert evidence.section_heading == "Introduction"
         assert evidence.quote == "This is a valid quote with sufficient length."
-        assert evidence.start_char == 100
-        assert evidence.end_char == 150
     
     def test_quote_too_short(self):
         """Test validation fails for quotes that are too short."""
         with pytest.raises(ValidationError):
             Evidence(
                 page=1,
-                quote="Short",  # Too short
-                start_char=100,
-                end_char=105
+                quote="Short"  # Too short
             )
     
     def test_quote_too_long(self):
@@ -60,9 +53,7 @@ class TestEvidence:
         with pytest.raises(ValidationError):
             Evidence(
                 page=1,
-                quote=long_quote,
-                start_char=100,
-                end_char=601
+                quote=long_quote
             )
     
     def test_empty_quote(self):
@@ -70,9 +61,7 @@ class TestEvidence:
         with pytest.raises(ValidationError):
             Evidence(
                 page=1,
-                quote="",
-                start_char=100,
-                end_char=100
+                quote=""
             )
     
     def test_whitespace_only_quote(self):
@@ -80,18 +69,14 @@ class TestEvidence:
         with pytest.raises(ValidationError):
             Evidence(
                 page=1,
-                quote="   \n\t   ",
-                start_char=100,
-                end_char=110
+                quote="   \n\t   "
             )
 
     def test_quote_cleaning(self):
         """Test that quotes are properly cleaned."""
         evidence = Evidence(
             page=1,
-            quote="  This quote has extra whitespace  ",
-            start_char=100,
-            end_char=130
+            quote="  This quote has extra whitespace  "
         )
         
         assert evidence.quote == "This quote has extra whitespace"
@@ -167,6 +152,70 @@ class TestDocumentMetrics:
             )
 
 
+class TestDocumentFrontMatter:
+    """Test DocumentFrontMatter model validation."""
+    
+    def test_valid_front_matter(self):
+        """Test valid front matter creation."""
+        front_matter = DocumentFrontMatter(
+            title="Test Policy Brief",
+            authors=["John Smith", "Jane Doe"],
+            affiliations=["University of Policy"], 
+            emails=["john@example.com"],
+            urls=["https://example.org"],
+            funding_statements=["Supported by Research Grant 123"],
+            linked_studies=["Full report: Policy Analysis 2024"]
+        )
+        
+        assert front_matter.title == "Test Policy Brief"
+        assert len(front_matter.authors) == 2
+        assert "John Smith" in front_matter.authors
+        assert len(front_matter.emails) == 1
+        assert front_matter.emails[0] == "john@example.com"
+    
+    def test_empty_front_matter(self):
+        """Test front matter with empty/default fields."""
+        front_matter = DocumentFrontMatter()
+        
+        assert front_matter.title is None
+        assert front_matter.authors == []
+        assert front_matter.affiliations == []
+        assert front_matter.emails == []
+        assert front_matter.urls == []
+        assert front_matter.funding_statements == []
+        assert front_matter.linked_studies == []
+    
+    def test_partial_front_matter(self):
+        """Test front matter with only some fields populated."""
+        front_matter = DocumentFrontMatter(
+            title="Partial Brief",
+            authors=["Author Only"]
+        )
+        
+        assert front_matter.title == "Partial Brief"
+        assert len(front_matter.authors) == 1
+        assert front_matter.affiliations == []  # Should default to empty
+        assert front_matter.emails == []
+    
+    def test_front_matter_serialization(self):
+        """Test front matter serialization."""
+        front_matter = DocumentFrontMatter(
+            title="Serialization Test",
+            authors=["Test Author"],
+            emails=["test@example.com"]
+        )
+        
+        data = front_matter.model_dump()
+        assert isinstance(data, dict)
+        assert data["title"] == "Serialization Test"
+        assert data["authors"] == ["Test Author"]
+        
+        # Test deserialization
+        new_front_matter = DocumentFrontMatter.model_validate(data)
+        assert new_front_matter.title == front_matter.title
+        assert new_front_matter.authors == front_matter.authors
+
+
 class TestFrameAssessment:
     """Test FrameAssessment model validation."""
     
@@ -174,9 +223,7 @@ class TestFrameAssessment:
         """Test valid frame assessment."""
         evidence = Evidence(
             page=1,
-            quote="This is evidence for the frame being present.",
-            start_char=100,
-            end_char=150
+            quote="This is evidence for the frame being present."
         )
         
         assessment = FrameAssessment(
@@ -198,9 +245,7 @@ class TestFrameAssessment:
         """Test confidence must be between 0 and 1."""
         evidence = Evidence(
             page=1,
-            quote="Valid evidence quote here.",
-            start_char=100,
-            end_char=130
+            quote="Valid evidence quote here."
         )
         
         # Test confidence > 1
@@ -259,9 +304,7 @@ class TestPolicyRecommendation:
         """Test valid recommendation creation."""
         evidence = Evidence(
             page=2,
-            quote="The government should implement carbon pricing mechanisms.",
-            start_char=200,
-            end_char=260
+            quote="The government should implement carbon pricing mechanisms."
         )
         
         recommendation = PolicyRecommendation(
@@ -304,9 +347,7 @@ class TestPolicyRecommendation:
         """Test enum field validation."""
         evidence = Evidence(
             page=1,
-            quote="Valid evidence quote here.",
-            start_char=100,
-            end_char=130
+            quote="Valid evidence quote here."
         )
         
         # Test invalid enum value
@@ -414,10 +455,7 @@ class TestModelSerialization:
         """Test Evidence model JSON serialization."""
         evidence = Evidence(
             page=1,
-            section_heading="Introduction",
-            quote="This is a test quote for serialization testing purposes.",
-            start_char=100,
-            end_char=160
+            quote="This is a test quote for serialization testing purposes."
         )
         
         # Test serialization to dict
@@ -430,15 +468,12 @@ class TestModelSerialization:
         new_evidence = Evidence.model_validate(data)
         assert new_evidence.page == evidence.page
         assert new_evidence.quote == evidence.quote
-        assert new_evidence.section_heading == evidence.section_heading
     
     def test_frame_assessment_serialization(self):
         """Test FrameAssessment model serialization."""
         evidence = Evidence(
             page=1,
-            quote="Test evidence quote here for serialization.",
-            start_char=100,
-            end_char=140
+            quote="Test evidence quote here for serialization."
         )
         
         assessment = FrameAssessment(
@@ -459,6 +494,78 @@ class TestModelSerialization:
         assert new_assessment.confidence == assessment.confidence
         assert len(new_assessment.evidence) == 1
         assert new_assessment.evidence[0].quote == evidence.quote
+    
+    def test_per_document_extraction_with_front_matter(self):
+        """Test PerDocumentExtraction with front matter field."""
+        from datetime import datetime
+        
+        # Create test components
+        page = PageText(page_num=1, text="Test content", char_count=12, word_count=2)
+        
+        metadata = PDFMetadata(title="PDF Title")
+        
+        front_matter = DocumentFrontMatter(
+            title="Content Title",
+            authors=["Test Author"],
+            emails=["test@example.com"]
+        )
+        
+        metrics = DocumentMetrics(
+            page_count=1,
+            word_count=2,
+            char_count=12,
+            heading_count=0,
+            paragraph_count=1,
+            sentence_count=1,
+            list_item_count=0,
+            avg_sentence_length=2.0,
+            lexical_diversity=1.0,
+            avg_word_length=6.0
+        )
+        
+        processing_status = ProcessingStatus(
+            doc_id="test_doc",
+            file_path="test.pdf",
+            file_hash="abc123",
+            file_size_bytes=1000,
+            processing_timestamp=datetime.now(),
+            processing_duration_seconds=1.0,
+            parser_used="pymupdf",
+            likely_scanned=False,
+            text_extraction_quality=1.0,
+            pages_processed=1,
+            frames_processed=0,
+            recommendations_extracted=0
+        )
+        
+        # Create PerDocumentExtraction with front matter
+        extraction = PerDocumentExtraction(
+            doc_id="test_doc",
+            pages=[page],
+            headings=[], 
+            metadata=metadata,
+            front_matter=front_matter,
+            metrics=metrics,
+            frame_assessments=[],
+            recommendations=[],
+            processing_status=processing_status
+        )
+        
+        # Test field access
+        assert extraction.front_matter is not None
+        assert extraction.front_matter.title == "Content Title"
+        assert "Test Author" in extraction.front_matter.authors
+        
+        # Test serialization includes front matter
+        data = extraction.model_dump()
+        assert "front_matter" in data
+        assert data["front_matter"]["title"] == "Content Title"
+        assert data["front_matter"]["authors"] == ["Test Author"]
+        
+        # Test deserialization
+        new_extraction = PerDocumentExtraction.model_validate(data)
+        assert new_extraction.front_matter.title == front_matter.title
+        assert new_extraction.front_matter.authors == front_matter.authors
 
 
 if __name__ == "__main__":

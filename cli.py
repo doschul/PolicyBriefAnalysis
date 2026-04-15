@@ -153,6 +153,14 @@ def extract(
         logger.info(f"Processed {len(results['processed'])} documents")
         logger.info(f"Skipped {len(results['skipped'])} unchanged documents")
         
+        if results['processed']:
+            summary = pipeline.compute_extraction_summary(results['processed'])
+            logger.info(f"Extraction summary: {summary['total_extractions']} extractions, "
+                        f"{summary['total_frames_present']} frames present")
+            if summary.get('warnings'):
+                for w in summary['warnings']:
+                    logger.warning(f"  ⚠ {w}")
+        
         if results['errors']:
             logger.warning(f"Encountered {len(results['errors'])} errors:")
             for error in results['errors']:

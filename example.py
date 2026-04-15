@@ -89,6 +89,8 @@ def analyze_results_example(output_dir: Path):
         documents_file = output_dir / "documents.csv"
         frames_file = output_dir / "frames.csv"
         recommendations_file = output_dir / "recommendations.csv"
+        sections_file = output_dir / "sections.csv"
+        structural_core_file = output_dir / "structural_core.csv"
         
         if not all(f.exists() for f in [documents_file, frames_file, recommendations_file]):
             print("⚠️  Result files not found. Run processing first.")
@@ -103,6 +105,15 @@ def analyze_results_example(output_dir: Path):
         print(f"   Documents processed: {len(documents_df)}")
         print(f"   Total frame assessments: {len(frames_df)}")
         print(f"   Total recommendations: {len(recommendations_df)}")
+        
+        if sections_file.exists():
+            sections_df = pd.read_csv(sections_file)
+            print(f"   Total sections detected: {len(sections_df)}")
+        
+        if structural_core_file.exists():
+            sc_df = pd.read_csv(structural_core_file)
+            problems_present = (sc_df['problem_status'] == 'present').sum()
+            print(f"   Documents with explicit problem framing: {problems_present}/{len(sc_df)}")
         
         # Frame analysis
         frame_stats = frames_df.groupby('decision').size()
@@ -124,10 +135,11 @@ def analyze_results_example(output_dir: Path):
             for instrument, count in instrument_stats.head().items():
                 print(f"   {instrument}: {count}")
             
-            actor_stats = recommendations_df['actor'].value_counts()
-            print(f"\n👥 Implementation Actors:")
-            for actor, count in actor_stats.head().items():
-                print(f"   {actor}: {count}")
+            if 'actor_type_normalized' in recommendations_df.columns:
+                actor_stats = recommendations_df['actor_type_normalized'].value_counts()
+                print(f"\n👥 Implementation Actors:")
+                for actor, count in actor_stats.head().items():
+                    print(f"   {actor}: {count}")
         
         # Document quality metrics
         avg_quality = documents_df['text_extraction_quality'].mean()
@@ -207,13 +219,31 @@ def audit_file_example(output_dir: Path):
             frame_label = assessment['frame_label']
             print(f"   {frame_label}: {decision} (confidence: {confidence:.2f})")
         
-        # Show recommendations
-        if audit_data['recommendations']:
-            print(f"\n📋 Recommendations:")
-            for i, rec in enumerate(audit_data['recommendations'][:3]):  # Show first 3
-                actor = rec['actor']
-                action = rec['action'][:50] + "..." if len(rec['action']) > 50 else rec['action']
-                print(f"   {i+1}. {actor} should {action}")
+        # Show policy extractions (or legacy recommendations)
+        extractions = audit_data.get('policy_extractions', [])
+        if extractions:
+            print(f"\n📋 Policy Extractions ({len(extractions)} total):")
+            for i, ext in enumerate(extractions[:3]):
+                actor = ext.get('actor_text_raw', 'Unknown actor')
+                action = ext.get('action_text_raw', '')
+                if len(action) > 50:
+                    action = action[:50] + "..."
+                print(f"   {i+1}. [{ext.get('extraction_type', '?')}] {actor} → {action}")
+        
+        # Show front matter if present
+        fm = audit_data.get('front_matter')
+        if fm:
+            print(f"\n📝 Front matter:")
+            if fm.get('title'):
+                print(f"   Title: {fm['title']}")
+            if fm.get('authors'):
+                print(f"   Authors: {', '.join(fm['authors'])}")
+        
+        # Show section map summary
+        sm = audit_data.get('section_map')
+        if sm and sm.get('sections'):
+            labels = [s.get('normalized_label', '?') for s in sm['sections']]
+            print(f"\n📑 Sections detected: {', '.join(labels)}")
         
     except Exception as e:
         print(f"❌ Failed to load audit file: {e}")

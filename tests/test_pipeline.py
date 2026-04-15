@@ -15,8 +15,11 @@ from src.policybrief.models import (
     PageText,
     PDFMetadata,
     DocumentMetrics,
+    DocumentFrontMatter, 
     FrameAssessment,
     PolicyRecommendation,
+    PolicyExtraction,
+    ExtractionType,
     ProcessingStatus,
     PerDocumentExtraction,
     Evidence,
@@ -25,7 +28,8 @@ from src.policybrief.models import (
     GeographicScope,
     Timeframe,
     RecommendationStrength,
-    ActorType
+    ActorType,
+    SectionLabel,
 )
 
 
@@ -136,9 +140,7 @@ def sample_extraction_result():
     """Create sample extraction result for testing."""
     evidence = Evidence(
         page=1,
-        quote="This is a test evidence quote from the document.",
-        start_char=100,
-        end_char=150
+        quote="This is a test evidence quote from the document."
     )
     
     frame_assessment = FrameAssessment(
@@ -161,6 +163,25 @@ def sample_extraction_result():
         timeframe=Timeframe.SHORT_TERM,
         strength=RecommendationStrength.SHOULD,
         evidence=[evidence]
+    )
+    
+    policy_extraction = PolicyExtraction(
+        rec_id="test_doc_rec_01",
+        extraction_type=ExtractionType.RECOMMENDATION,
+        confidence=0.9,
+        source_text_raw="Governments should implement test policies for environmental protection.",
+        source_section=SectionLabel.RECOMMENDATIONS,
+        page=1,
+        actor_text_raw="Governments",
+        actor_type_normalized=ActorType.GOVERNMENT,
+        action_text_raw="implement test policies",
+        target_text_raw="environmental protection",
+        instrument_type=InstrumentType.REGULATION,
+        policy_domain="environment",
+        geographic_scope=GeographicScope.NATIONAL,
+        timeframe=Timeframe.SHORT_TERM,
+        strength=RecommendationStrength.SHOULD,
+        evidence=[evidence],
     )
     
     extraction = PerDocumentExtraction(
@@ -187,6 +208,7 @@ def sample_extraction_result():
         ),
         frame_assessments=[frame_assessment],
         recommendations=[recommendation],
+        policy_extractions=[policy_extraction],
         processing_status=ProcessingStatus(
             doc_id="test_doc",
             file_path="/test.pdf",
@@ -310,19 +332,23 @@ class TestDocumentProcessing:
             confidence=0.8,
             evidence=[Evidence(
                 page=1,
-                quote="Test evidence quote from document content.",
-                start_char=10,
-                end_char=50
+                quote="Test evidence quote from document content."
             )],
             rationale="Evidence found."
         )]
         mock_detect_frames.return_value = mock_frames
         
-        mock_recommendations = [PolicyRecommendation(
+        mock_policy_extractions = [PolicyExtraction(
             rec_id="test_rec_1",
-            actor=ActorType.GOVERNMENT,
-            action="implement test policy",
-            target="test outcomes",
+            extraction_type=ExtractionType.RECOMMENDATION,
+            confidence=0.9,
+            source_text_raw="Government should implement test policy for outcomes.",
+            source_section=SectionLabel.RECOMMENDATIONS,
+            page=1,
+            actor_text_raw="Government",
+            actor_type_normalized=ActorType.GOVERNMENT,
+            action_text_raw="implement test policy",
+            target_text_raw="test outcomes",
             instrument_type=InstrumentType.REGULATION,
             policy_domain="environment",
             geographic_scope=GeographicScope.NATIONAL,
@@ -330,12 +356,10 @@ class TestDocumentProcessing:
             strength=RecommendationStrength.SHOULD,
             evidence=[Evidence(
                 page=1,
-                quote="Government should implement test policy for outcomes.",
-                start_char=20,
-                end_char=70
+                quote="Government should implement test policy for outcomes."
             )]
         )]
-        mock_extract_recs.return_value = mock_recommendations
+        mock_extract_recs.return_value = mock_policy_extractions
         
         # Initialize pipeline
         pipeline = PolicyBriefPipeline(
@@ -352,7 +376,7 @@ class TestDocumentProcessing:
         assert result.doc_id is not None
         assert len(result.pages) == 1
         assert len(result.frame_assessments) == 1
-        assert len(result.recommendations) == 1
+        assert len(result.policy_extractions) == 1
         assert result.processing_status.parser_used == "pymupdf"
         
         # Verify mocks were called
@@ -445,14 +469,15 @@ class TestOutputGeneration:
         assert len(df) == 1
         assert "doc_id" in df.columns
         assert "rec_id" in df.columns
-        assert "actor" in df.columns
-        assert "action" in df.columns
+        assert "extraction_type" in df.columns
+        assert "actor_text_raw" in df.columns
+        assert "action_text_raw" in df.columns
         assert "instrument_type" in df.columns
         assert "evidence_quotes" in df.columns
         
         row = df.iloc[0]
         assert row["doc_id"] == "test_doc"
-        assert row["actor"] == "government"
+        assert row["actor_type_normalized"] == "government"
         assert row["instrument_type"] == "regulation"
     
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test_key"})
@@ -467,6 +492,7 @@ class TestOutputGeneration:
         pipeline._generate_output_files([sample_extraction_result])
         
         # Should have called save_dataframe 3 times (documents, frames, recommendations)
+        # sections and structural_core are empty because sample_extraction_result lacks them
         assert mock_save_df.call_count == 3
         
         # Check that dataframes were saved to correct paths
@@ -527,6 +553,169 @@ class TestErrorHandling:
         assert results["processed"] == []
         assert results["skipped"] == []
         assert results["errors"] == []
+
+
+class TestFrontMatterIntegration:
+    """Test front-matter extraction integration with pipeline."""
+    
+    @patch.dict("os.environ", {"OPENAI_API_KEY": "test_key"})
+    @patch("src.policybrief.pdf_extractor.PDFExtractor.extract_document")
+    @patch("src.policybrief.frame_detector.FrameDetector.detect_frames")
+    @patch("src.policybrief.recommendation_extractor.RecommendationExtractor.extract_recommendations")
+    def test_pipeline_includes_front_matter_extraction(
+        self, 
+        mock_extract_recs,
+        mock_detect_frames, 
+        mock_extract_pdf,
+        temp_config_dir,
+        temp_output_dir,
+        mock_pdf_file
+    ):
+        """Test that pipeline includes front-matter extraction in processing."""
+        # Setup mocks with content that should trigger front-matter extraction
+        mock_pages = [PageText(
+            page_num=1,
+            text="""Climate Policy Assessment
+
+Authors:
+Dr. Sarah Johnson
+Prof. Michael Chen
+
+Contact: s.johnson@climatepolicy.org
+Website: https://www.climatepolicy.org
+
+This comprehensive study examines climate policy implementations.""",
+            char_count=200,
+            word_count=30
+        )]
+        
+        mock_metadata = PDFMetadata(title="Old PDF Title")
+        mock_extraction_info = {
+            "likely_scanned": False,
+            "text_extraction_quality": 0.95,
+            "warnings": []
+        }
+        
+        mock_extract_pdf.return_value = (mock_pages, mock_metadata, mock_extraction_info)
+        mock_detect_frames.return_value = []
+        mock_extract_recs.return_value = []
+        
+        # Initialize pipeline
+        pipeline = PolicyBriefPipeline(
+            config_dir=temp_config_dir,
+            output_dir=temp_output_dir,
+            max_workers=1
+        )
+        
+        # Process document
+        result = pipeline._process_single_document(mock_pdf_file)
+        
+        # Verify front matter was extracted
+        assert result is not None
+        assert result.front_matter is not None
+        assert result.front_matter.title == "Climate Policy Assessment"
+        assert len(result.front_matter.authors) == 2
+        assert "Dr. Sarah Johnson" in result.front_matter.authors
+        assert "Prof. Michael Chen" in result.front_matter.authors
+        assert "s.johnson@climatepolicy.org" in result.front_matter.emails
+        assert "https://www.climatepolicy.org" in result.front_matter.urls
+    
+    @patch.dict("os.environ", {"OPENAI_API_KEY": "test_key"})
+    def test_front_matter_in_csv_output(self, temp_config_dir, temp_output_dir):
+        """Test that front-matter fields appear in CSV output."""
+        pipeline = PolicyBriefPipeline(
+            config_dir=temp_config_dir,
+            output_dir=temp_output_dir
+        )
+        
+        # Create extraction result with front matter
+        front_matter = DocumentFrontMatter(
+            title="Content-derived Title",
+            authors=["Author One", "Author Two"],
+            emails=["author@example.com"],
+            urls=["https://example.org"],
+            affiliations=["Test University"],
+            funding_statements=["Funded by Research Grant"],
+            linked_studies=["Related Study 2024"]
+        )
+        
+        extraction = PerDocumentExtraction(
+            doc_id="test_doc",
+            pages=[PageText(
+                page_num=1,
+                text="Test content",
+                char_count=12,
+                word_count=2
+            )],
+            headings=[],
+            metadata=PDFMetadata(title="PDF Title"),
+            front_matter=front_matter,
+            metrics=DocumentMetrics(
+                page_count=1,
+                word_count=2,
+                char_count=12,
+                heading_count=0,
+                paragraph_count=1,
+                sentence_count=1,
+                list_item_count=0,
+                avg_sentence_length=2.0,
+                lexical_diversity=1.0,
+                avg_word_length=6.0
+            ),
+            frame_assessments=[],
+            recommendations=[],
+            processing_status=ProcessingStatus(
+                doc_id="test_doc",
+                file_path="/test.pdf",
+                file_hash="test_hash",
+                file_size_bytes=1024,
+                processing_timestamp=datetime.now(),
+                processing_duration_seconds=1.0,
+                parser_used="pymupdf",
+                likely_scanned=False,
+                text_extraction_quality=1.0,
+                pages_processed=1,
+                frames_processed=0,
+                recommendations_extracted=0
+            )
+        )
+        
+        # Generate documents dataframe
+        df = pipeline._create_documents_dataframe([extraction])
+        
+        # Check that front-matter columns exist
+        assert "content_title" in df.columns
+        assert "content_authors" in df.columns
+        assert "affiliations" in df.columns
+        assert "emails" in df.columns
+        assert "urls" in df.columns
+        assert "funding_statements" in df.columns
+        assert "linked_studies" in df.columns
+        
+        # Check values
+        row = df.iloc[0]
+        assert row["title"] == "PDF Title"  # Original PDF metadata
+        assert row["content_title"] == "Content-derived Title"  # Content-derived
+        assert row["content_authors"] == "Author One|Author Two"
+        assert row["emails"] == "author@example.com"
+        assert row["urls"] == "https://example.org"
+        assert row["affiliations"] == "Test University"
+        assert row["funding_statements"] == "Funded by Research Grant"
+        assert row["linked_studies"] == "Related Study 2024"
+    
+    @patch.dict("os.environ", {"OPENAI_API_KEY": "test_key"})
+    def test_pipeline_frontmatter_extractor_initialized(self, temp_config_dir, temp_output_dir):
+        """Test that pipeline properly initializes front-matter extractor."""
+        pipeline = PolicyBriefPipeline(
+            config_dir=temp_config_dir,
+            output_dir=temp_output_dir
+        )
+        
+        # Verify front-matter extractor is initialized
+        assert hasattr(pipeline, 'frontmatter_extractor')
+        assert pipeline.frontmatter_extractor is not None
+        from src.policybrief.frontmatter_extractor import FrontMatterExtractor
+        assert isinstance(pipeline.frontmatter_extractor, FrontMatterExtractor)
 
 
 if __name__ == "__main__":

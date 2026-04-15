@@ -16,16 +16,20 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 
 from .frame_detector import FrameDetector
+from .frontmatter_extractor import FrontMatterExtractor
 from .llm_client import LLMClient
 from .metrics_calculator import MetricsCalculator
 from .models import (
     PerDocumentExtraction,
     ProcessingStatus,
     FrameAssessment,
-    PolicyRecommendation
+    PolicyRecommendation,
+    PolicyExtraction,
 )
 from .pdf_extractor import PDFExtractor
 from .recommendation_extractor import RecommendationExtractor
+from .section_segmenter import SectionSegmenter
+from .structural_core_extractor import StructuralCoreExtractor
 from .utils import (
     create_document_id,
     ensure_output_directories,
@@ -73,9 +77,20 @@ class PolicyBriefPipeline:
         self.frames = self._load_frames_config()
         self.enums = self._load_enums_config()
         
+        # Module switches (all default to enabled)
+        modules_cfg = self.config.get("modules", {})
+        self.enable_front_matter = modules_cfg.get("front_matter", True)
+        self.enable_section_segmentation = modules_cfg.get("section_segmentation", True)
+        self.enable_structural_core = modules_cfg.get("structural_core", True)
+        self.enable_frames = modules_cfg.get("frames", True)
+        self.enable_recommendations = modules_cfg.get("recommendations", True)
+        
         # Initialize components
         self.llm_client = self._initialize_llm_client()
         self.pdf_extractor = self._initialize_pdf_extractor()
+        self.frontmatter_extractor = FrontMatterExtractor()
+        self.section_segmenter = SectionSegmenter()
+        self.structural_core_extractor = StructuralCoreExtractor()
         self.metrics_calculator = MetricsCalculator()
         self.frame_detector = self._initialize_frame_detector()
         self.recommendation_extractor = self._initialize_recommendation_extractor()
@@ -321,22 +336,65 @@ class PolicyBriefPipeline:
                 logger.warning(f"No text content extracted from {file_path}")
                 return None
             
-            # Extract headings
-            headings = self.pdf_extractor.extract_headings(pages)
+            # Build section map and derive headings
+            section_map = None
+            headings = []
+            if self.enable_section_segmentation:
+                try:
+                    layout_lines = extraction_info.get("layout_lines", [])
+                    section_map = self.section_segmenter.segment_document(pages, layout_lines)
+                    headings = [
+                        s.raw_title for s in section_map.sections if s.raw_title
+                    ]
+                except Exception as e:
+                    logger.warning(f"Section segmentation failed for {doc_id}, continuing: {e}")
+            
+            # Extract structural core components
+            structural_core = None
+            if self.enable_structural_core:
+                try:
+                    structural_core = self.structural_core_extractor.extract(pages, section_map)
+                except Exception as e:
+                    logger.warning(f"Structural core extraction failed for {doc_id}, continuing: {e}")
+            
+            # Extract front matter from content
+            front_matter = None
+            if self.enable_front_matter:
+                try:
+                    front_matter = self.frontmatter_extractor.extract_front_matter(pages)
+                except Exception as e:
+                    logger.warning(f"Front matter extraction failed for {doc_id}, continuing: {e}")
             
             # Calculate metrics
             full_text = "\n".join(page.text for page in pages)
             metrics = self.metrics_calculator.calculate_metrics(pages, headings, full_text)
             
             # Detect theoretical frames
-            frame_assessments = self.frame_detector.detect_frames(pages)
+            frame_assessments = []
+            policy_mix_present = False
+            if self.enable_frames:
+                try:
+                    frame_assessments = self.frame_detector.detect_frames(pages)
+                    # Detect policy-mix / instrument-combination annotation
+                    policy_mix_present = self.frame_detector.detect_policy_mix(
+                        pages, frame_assessments
+                    )
+                except Exception as e:
+                    logger.warning(f"Frame detection failed for {doc_id}, continuing: {e}")
             
-            # Extract recommendations
-            recommendations = self.recommendation_extractor.extract_recommendations(pages)
+            # Extract recommendations (section-aware, Prompt 4 rewrite)
+            policy_extractions = []
+            if self.enable_recommendations:
+                try:
+                    policy_extractions = self.recommendation_extractor.extract_recommendations(
+                        pages, section_map=section_map
+                    )
+                except Exception as e:
+                    logger.warning(f"Recommendation extraction failed for {doc_id}, continuing: {e}")
             
-            # Generate recommendation IDs
-            for i, rec in enumerate(recommendations):
-                rec.rec_id = f"{doc_id}_rec_{i+1:02d}"
+            # Generate extraction IDs
+            for i, ext in enumerate(policy_extractions):
+                ext.rec_id = f"{doc_id}_rec_{i+1:02d}"
             
             # Create processing status
             processing_duration = time.time() - start_time
@@ -354,7 +412,7 @@ class PolicyBriefPipeline:
                 text_extraction_quality=extraction_info.get("text_extraction_quality", 1.0),
                 pages_processed=len(pages),
                 frames_processed=len(frame_assessments),
-                recommendations_extracted=len(recommendations),
+                recommendations_extracted=len(policy_extractions),
                 warnings=extraction_info.get("warnings", [])
             )
             
@@ -363,17 +421,22 @@ class PolicyBriefPipeline:
                 doc_id=doc_id,
                 pages=pages,
                 headings=headings,
+                section_map=section_map,
+                structural_core=structural_core,
                 metadata=metadata,
+                front_matter=front_matter,
                 metrics=metrics,
                 frame_assessments=frame_assessments,
-                recommendations=recommendations,
+                policy_mix_present=policy_mix_present,
+                recommendations=[],  # Legacy field, kept for backward compat
+                policy_extractions=policy_extractions,
                 processing_status=processing_status
             )
             
             # Save audit file
             self._save_audit_file(extraction)
             
-            logger.info(f"Completed processing {doc_id}: {len(frame_assessments)} frames, {len(recommendations)} recommendations")
+            logger.info(f"Completed processing {doc_id}: {len(frame_assessments)} frames, {len(policy_extractions)} extractions")
             
             return extraction
             
@@ -401,6 +464,58 @@ class PolicyBriefPipeline:
             
         except Exception as e:
             logger.error(f"Failed to save audit file for {extraction.doc_id}: {e}")
+    
+    def compute_extraction_summary(self, results: List[PerDocumentExtraction]) -> Dict[str, Any]:
+        """Compute a lightweight evaluation summary over extraction results.
+        
+        Returns counts, null rates, and warning flags useful for
+        precision-oriented auditing without needing ground-truth labels.
+        """
+        n = len(results)
+        if n == 0:
+            return {"document_count": 0}
+        
+        front_matter_null = sum(1 for r in results if r.front_matter is None)
+        section_map_null = sum(1 for r in results if r.section_map is None)
+        structural_core_null = sum(1 for r in results if r.structural_core is None)
+        frames_absent = sum(1 for r in results if not r.frame_assessments)
+        recs_absent = sum(1 for r in results if not r.policy_extractions)
+        
+        total_extractions = sum(len(r.policy_extractions) for r in results)
+        total_frames_present = sum(
+            sum(1 for f in r.frame_assessments if f.decision == "present")
+            for r in results
+        )
+        
+        # Warning flags
+        warnings = []
+        if front_matter_null == n:
+            warnings.append("all_front_matter_null")
+        if section_map_null == n:
+            warnings.append("all_section_maps_null")
+        if recs_absent == n and n > 0:
+            warnings.append("zero_recommendations_extracted")
+        if total_extractions > 0:
+            from_references = sum(
+                1 for r in results for e in r.policy_extractions
+                if e.source_section and e.source_section.value == "references"
+            )
+            if from_references / total_extractions > 0.3:
+                warnings.append("high_reference_section_extractions")
+        
+        return {
+            "document_count": n,
+            "front_matter_null": front_matter_null,
+            "section_map_null": section_map_null,
+            "structural_core_null": structural_core_null,
+            "frames_absent": frames_absent,
+            "recommendations_absent": recs_absent,
+            "total_extractions": total_extractions,
+            "total_frames_present": total_frames_present,
+            "avg_extractions_per_doc": round(total_extractions / n, 2),
+            "policy_mix_count": sum(1 for r in results if r.policy_mix_present),
+            "warnings": warnings,
+        }
     
     def _generate_output_files(self, results: List[PerDocumentExtraction]) -> None:
         """Generate tabular output files from processing results."""
@@ -431,6 +546,20 @@ class PolicyBriefPipeline:
                 if fmt in ["csv", "parquet"]:
                     save_dataframe(recommendations_df, self.output_dir / f"recommendations.{fmt}", fmt)
             
+            # Generate sections table (one row per section per document)
+            sections_df = self._create_sections_dataframe(results)
+            if not sections_df.empty:
+                for fmt in formats:
+                    if fmt in ["csv", "parquet"]:
+                        save_dataframe(sections_df, self.output_dir / f"sections.{fmt}", fmt)
+            
+            # Generate structural core table
+            structural_core_df = self._create_structural_core_dataframe(results)
+            if not structural_core_df.empty:
+                for fmt in formats:
+                    if fmt in ["csv", "parquet"]:
+                        save_dataframe(structural_core_df, self.output_dir / f"structural_core.{fmt}", fmt)
+            
             logger.info("Output files generated successfully")
             
         except Exception as e:
@@ -454,6 +583,15 @@ class PolicyBriefPipeline:
                 "creation_date": result.metadata.creation_date,
                 "subject": result.metadata.subject or "",
                 
+                # Content-derived front matter
+                "content_title": result.front_matter.title if result.front_matter else "",
+                "content_authors": "|".join(result.front_matter.authors) if result.front_matter else "",
+                "affiliations": "|".join(result.front_matter.affiliations) if result.front_matter else "",
+                "emails": "|".join(result.front_matter.emails) if result.front_matter else "",
+                "urls": "|".join(result.front_matter.urls) if result.front_matter else "",
+                "funding_statements": "|".join(result.front_matter.funding_statements) if result.front_matter else "",
+                "linked_studies": "|".join(result.front_matter.linked_studies) if result.front_matter else "",
+                
                 # Processing info
                 "processing_timestamp": result.processing_status.processing_timestamp,
                 "processing_duration_seconds": result.processing_status.processing_duration_seconds,
@@ -466,7 +604,8 @@ class PolicyBriefPipeline:
                 # Summary counts
                 "frames_present": len([f for f in result.frame_assessments if f.decision == "present"]),
                 "frames_absent": len([f for f in result.frame_assessments if f.decision == "absent"]),
-                "recommendations_count": len(result.recommendations),
+                "policy_mix_present": result.policy_mix_present,
+                "recommendations_count": len(result.policy_extractions),
             }
             
             rows.append(row)
@@ -501,31 +640,98 @@ class PolicyBriefPipeline:
         return pd.DataFrame(rows)
     
     def _create_recommendations_dataframe(self, results: List[PerDocumentExtraction]) -> pd.DataFrame:
-        """Create recommendations dataframe from processing results."""
+        """Create recommendations dataframe from processing results.
+
+        MIGRATION (Prompt 4): Now reads from ``policy_extractions`` and
+        emits richer columns including extraction_type, source_section,
+        raw text fields, and sub-component lists.
+        """
         rows = []
         
         for result in results:
-            for rec in result.recommendations:
+            for ext in result.policy_extractions:
                 # Prepare evidence text
-                evidence_quotes = [clean_text_for_csv(ev.quote, 200) for ev in rec.evidence]
-                evidence_pages = [str(ev.page) for ev in rec.evidence]
+                evidence_quotes = [clean_text_for_csv(ev.quote, 200) for ev in ext.evidence]
+                evidence_pages = [str(ev.page) for ev in ext.evidence]
                 
                 row = {
                     "doc_id": result.doc_id,
-                    "rec_id": rec.rec_id,
-                    "actor": rec.actor,
-                    "action": clean_text_for_csv(rec.action, 200),
-                    "target": clean_text_for_csv(rec.target, 200),
-                    "instrument_type": rec.instrument_type,
-                    "policy_domain": rec.policy_domain,
-                    "geographic_scope": rec.geographic_scope,
-                    "timeframe": rec.timeframe,
-                    "strength": rec.strength,
-                    "evidence_count": len(rec.evidence),
+                    "rec_id": ext.rec_id,
+                    "extraction_type": ext.extraction_type.value if ext.extraction_type else "",
+                    "confidence": ext.confidence,
+                    "source_section": ext.source_section.value if ext.source_section else "",
+                    "page": ext.page,
+                    # Raw text fields
+                    "source_text_raw": clean_text_for_csv(ext.source_text_raw, 300),
+                    "actor_text_raw": clean_text_for_csv(ext.actor_text_raw or "", 100),
+                    "actor_type_normalized": ext.actor_type_normalized.value if ext.actor_type_normalized else "",
+                    "action_text_raw": clean_text_for_csv(ext.action_text_raw or "", 200),
+                    "target_text_raw": clean_text_for_csv(ext.target_text_raw or "", 200),
+                    # Classification
+                    "instrument_type": ext.instrument_type.value if ext.instrument_type else "",
+                    "policy_domain": ext.policy_domain or "",
+                    "geographic_scope": ext.geographic_scope.value if ext.geographic_scope else "",
+                    "timeframe": ext.timeframe.value if ext.timeframe else "",
+                    "strength": ext.strength.value if ext.strength else "",
+                    # Sub-components
+                    "expected_outcomes": " | ".join(ext.expected_outcomes),
+                    "implementation_steps": " | ".join(ext.implementation_steps),
+                    "trade_offs": " | ".join(ext.trade_offs),
+                    # Evidence
+                    "evidence_count": len(ext.evidence),
                     "evidence_quotes": " | ".join(evidence_quotes),
-                    "evidence_pages": ",".join(evidence_pages)
+                    "evidence_pages": ",".join(evidence_pages),
                 }
                 
                 rows.append(row)
+        
+        return pd.DataFrame(rows)
+    
+    def _create_sections_dataframe(self, results: List[PerDocumentExtraction]) -> pd.DataFrame:
+        """Create sections dataframe (one row per section per document)."""
+        rows = []
+        
+        for result in results:
+            if not result.section_map:
+                continue
+            for i, section in enumerate(result.section_map.sections):
+                rows.append({
+                    "doc_id": result.doc_id,
+                    "section_index": i,
+                    "raw_title": section.raw_title or "",
+                    "normalized_label": section.normalized_label.value if section.normalized_label else "",
+                    "start_page": section.start_page,
+                    "end_page": section.end_page,
+                    "confidence": section.confidence,
+                    "rule_source": section.rule_source,
+                    "detection_method": result.section_map.detection_method,
+                })
+        
+        return pd.DataFrame(rows)
+    
+    def _create_structural_core_dataframe(self, results: List[PerDocumentExtraction]) -> pd.DataFrame:
+        """Create structural core summary (one row per document)."""
+        rows = []
+        
+        for result in results:
+            if not result.structural_core:
+                continue
+            sc = result.structural_core
+            rows.append({
+                "doc_id": result.doc_id,
+                "problem_status": sc.problem.status.value,
+                "problem_section": sc.problem.matched_section.value if sc.problem.matched_section else "",
+                "problem_labeled": sc.labeling.problem_labeled,
+                "solutions_count": len(sc.solutions),
+                "solutions_explicit": sum(
+                    1 for s in sc.solutions if s.option_type.value == "explicit_option"
+                ),
+                "solutions_labeled": sc.labeling.solutions_labeled,
+                "implementation_status": sc.implementation_status.value,
+                "implementation_count": len(sc.implementation),
+                "implementation_labeled": sc.labeling.implementation_labeled,
+                "narrative_hook_status": sc.narrative_hook.status.value,
+                "narrative_hook_type": sc.narrative_hook.hook_type.value if sc.narrative_hook.hook_type else "",
+            })
         
         return pd.DataFrame(rows)

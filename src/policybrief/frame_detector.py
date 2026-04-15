@@ -1,8 +1,13 @@
 """
-Theoretical frame detection with two-stage strategy to optimize token usage.
+Policy-instrument frame detection with two-stage strategy.
 
-Stage 1: Keyword-based candidate span selection
+Stage 1: Keyword-based candidate span selection (instrument-aware cues)
 Stage 2: LLM-based assessment of selected spans
+
+The typology follows smart regulation / regulatory pluralism
+(Gunningham & Grabosky 1998; Howlett 2011) with five instrument
+categories: command-and-control, economic instruments, self-regulation,
+voluntarism, and information strategies.
 """
 
 import logging
@@ -15,9 +20,39 @@ from .models import FrameAssessment, FrameDetectionInput, PageText, Evidence
 
 logger = logging.getLogger(__name__)
 
+# Minimum number of frames marked "present" to consider policy-mix
+# annotation.  The document must explicitly discuss complementarity or
+# instrument combination; mere co-occurrence is annotated but at lower
+# confidence.
+_POLICY_MIX_MIN_FRAMES = 2
+
+# Regex cues that indicate explicit discussion of policy mixes /
+# instrument complementarity.  Used for the policy_mix_present flag.
+_POLICY_MIX_CUES: List[re.Pattern] = [
+    re.compile(r"policy\s+mix", re.IGNORECASE),
+    re.compile(r"instrument\s+mix", re.IGNORECASE),
+    re.compile(r"mix\s+of\s+instruments", re.IGNORECASE),
+    re.compile(r"combin(?:ation|ing|ed)\s+(?:of\s+)?(?:instruments?|policies|measures|tools)", re.IGNORECASE),
+    re.compile(r"complement(?:ary|arity)", re.IGNORECASE),
+    re.compile(r"regulat(?:ory|ion)\s+pluralism", re.IGNORECASE),
+    re.compile(r"smart\s+regulation", re.IGNORECASE),
+    re.compile(r"hybrid\s+(?:governance|approach|instrument)", re.IGNORECASE),
+    re.compile(r"integrated\s+(?:policy|governance)\s+(?:approach|framework)", re.IGNORECASE),
+    re.compile(r"multi-?instrument", re.IGNORECASE),
+]
+
 
 class FrameDetector:
-    """Two-stage theoretical frame detection system."""
+    """Two-stage policy-instrument frame detection system.
+
+    Stage 1 selects candidate text spans via keyword matching against
+    instrument-specific cues defined in ``frames.yaml``.  Stage 2 sends
+    the top candidates to the LLM for structured assessment.
+
+    After all frames are assessed, :meth:`detect_policy_mix` checks
+    whether the document explicitly discusses instrument complementarity
+    or policy mixes.
+    """
     
     def __init__(
         self,
@@ -241,20 +276,35 @@ class FrameDetector:
         return None
     
     def _format_frame_definition(self, frame_config: Dict[str, Any]) -> str:
-        """Format frame definition for LLM consumption."""
-        definition = f"Frame: {frame_config.get('label', 'Unknown')}\n"
-        definition += f"Definition: {frame_config.get('short_definition', 'No definition')}\n"
-        
-        if frame_config.get('inclusion_cues'):
-            definition += f"Keywords/Indicators: {', '.join(frame_config['inclusion_cues'])}\n"
-        
-        if frame_config.get('exclusion_cues'):
-            definition += f"Exclusions: {', '.join(frame_config['exclusion_cues'])}\n"
-        
-        if frame_config.get('must_have'):
-            definition += f"Required elements: {frame_config['must_have']}"
-        
-        return definition
+        """Format frame definition for LLM consumption.
+
+        Includes analytical notes, positive examples, and false-positive
+        guidance when available in the config.
+        """
+        parts: List[str] = []
+        parts.append(f"Frame: {frame_config.get('label', 'Unknown')}")
+        parts.append(f"Definition: {frame_config.get('short_definition', 'No definition')}")
+
+        if frame_config.get("analytical_notes"):
+            parts.append(f"Analytical guidance: {frame_config['analytical_notes']}")
+
+        if frame_config.get("inclusion_cues"):
+            parts.append(f"Keywords/Indicators: {', '.join(frame_config['inclusion_cues'])}")
+
+        if frame_config.get("exclusion_cues"):
+            parts.append(f"Exclusions: {', '.join(frame_config['exclusion_cues'])}")
+
+        if frame_config.get("must_have"):
+            parts.append(f"Required elements: {frame_config['must_have']}")
+
+        if frame_config.get("positive_examples"):
+            examples = "\n  - ".join(frame_config["positive_examples"])
+            parts.append(f"Positive examples:\n  - {examples}")
+
+        if frame_config.get("false_positive_notes"):
+            parts.append(f"False-positive guidance: {frame_config['false_positive_notes']}")
+
+        return "\n".join(parts)
     
     def _validate_assessment(
         self,
@@ -336,3 +386,45 @@ class FrameDetector:
         except Exception as e:
             logger.error(f"Quote validation failed: {e}")
             return False
+
+    # ------------------------------------------------------------------
+    # Policy-mix / instrument-combination annotation
+    # ------------------------------------------------------------------
+
+    def detect_policy_mix(
+        self,
+        pages: List[PageText],
+        assessments: List[FrameAssessment],
+    ) -> bool:
+        """Detect whether the document explicitly discusses policy mixes.
+
+        Returns ``True`` when:
+          - at least ``_POLICY_MIX_MIN_FRAMES`` frames are present AND
+          - the document text contains explicit policy-mix / complementarity
+            language matching ``_POLICY_MIX_CUES``.
+
+        This is a conservative heuristic: mere co-occurrence of two
+        instrument categories is necessary but not sufficient.
+        """
+        present_count = sum(
+            1 for a in assessments if a.decision == "present"
+        )
+        if present_count < _POLICY_MIX_MIN_FRAMES:
+            return False
+
+        full_text = " ".join(p.text for p in pages if p.text)
+        for pattern in _POLICY_MIX_CUES:
+            if pattern.search(full_text):
+                logger.info(
+                    "Policy-mix language detected with %d instrument "
+                    "categories present",
+                    present_count,
+                )
+                return True
+
+        logger.debug(
+            "%d instrument categories present but no explicit "
+            "policy-mix language found",
+            present_count,
+        )
+        return False

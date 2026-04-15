@@ -1,193 +1,368 @@
-# Theoretical Frames Configuration
-# Define the closed vocabulary of theoretical frameworks to detect in policy briefs
+# Policy Instrument Typology — Forest Governance
+#
+# Grounded in smart regulation and regulatory pluralism (Gunningham & Grabosky
+# 1998; Howlett 2011).  The five categories below classify policy instruments
+# by their primary behavioural driver.  A single document may exhibit
+# multiple categories; the detection system explicitly allows co-occurrence
+# and annotates policy-mix / complementarity language when present.
+#
+# Each frame entry contains:
+#   id               – stable machine identifier (do not rename without migration)
+#   label            – human-readable name shown in output
+#   short_definition – one-sentence analytical definition (used in LLM prompt)
+#   analytical_notes – longer guidance for the LLM on scope and boundaries
+#   inclusion_cues   – keyword/phrase triggers for candidate-span selection
+#   exclusion_cues   – terms that reduce relevance score (not hard exclude)
+#   must_have        – at least one token from EACH group must appear in the
+#                      context window to receive a score boost
+#   positive_examples    – short synthetic sentences the LLM should recognise
+#   false_positive_notes – edge-case guidance to avoid misclassification
 
 frames:
-  
-  - id: "market_based_instruments"
-    label: "Market-Based Instruments"
-    short_definition: "Policies that use market mechanisms and economic incentives to achieve policy goals"
+
+  # ------------------------------------------------------------------
+  # 1. Command-and-Control
+  # ------------------------------------------------------------------
+  - id: "command_and_control"
+    label: "Command-and-Control"
+    short_definition: >-
+      Legally binding rules backed by state authority, including permits,
+      bans, zoning, technical standards, and compliance enforcement with
+      sanctions or penalties.
+    analytical_notes: >-
+      The defining logic is legal compulsion: binding rules, legal
+      requirements, sanctions, penalties, and compliance obligations.
+      Monitoring and enforcement belong here ONLY when tied to legal
+      compliance (e.g. forest-law enforcement).  If monitoring serves
+      transparency or disclosure without legal compulsion, classify under
+      information_strategies instead.
     inclusion_cues:
-      - "carbon pricing"
-      - "cap and trade" 
-      - "emissions trading"
-      - "carbon tax"
-      - "environmental tax"
-      - "price signal"
-      - "market mechanism"
-      - "economic incentive"
+      - "harvesting permit"
+      - "logging permit"
+      - "license"
+      - "licensing system"
+      - "land-use zoning"
+      - "zoning"
+      - "protected area"
+      - "national park"
+      - "nature reserve"
+      - "technical standard"
+      - "reduced-impact logging"
+      - "legal compliance"
+      - "compliance"
+      - "enforcement"
+      - "sanction"
+      - "penalty"
+      - "fine"
+      - "ban"
+      - "prohibition"
+      - "moratorium"
+      - "mandate"
+      - "regulation"
+      - "law"
+      - "legislation"
+      - "legal requirement"
+      - "legally binding"
+      - "command and control"
+      - "regulatory"
+      - "forest law"
+      - "FLEGT"
+      - "timber regulation"
+      - "EU Timber Regulation"
+      - "EUTR"
+      - "illegal logging"
+    exclusion_cues:
+      - "voluntary"
+      - "non-binding"
+      - "market-based"
+      - "payment for"
+      - "incentive"
+      - "self-regulatory"
+    must_have:
+      - ["permit", "license", "zoning", "ban", "prohibition", "regulation",
+         "law", "legislation", "standard", "mandate", "moratorium",
+         "sanction", "penalty", "enforcement", "compliance", "legally",
+         "FLEGT", "EUTR", "protected area"]
+      - ["legal", "binding", "compulsory", "mandatory", "required",
+         "enforcement", "compliance", "penalty", "sanction", "regulation",
+         "law", "prohibition", "permit", "ban"]
+    positive_examples:
+      - "The government requires all logging operators to obtain harvesting permits before timber extraction can proceed."
+      - "Non-compliant operators face fines under the revised forest legislation."
+      - "The protected-area network now covers 30% of the national forest estate."
+    false_positive_notes: >-
+      Do not classify under command-and-control if the text only mentions
+      monitoring for transparency/disclosure purposes without legal
+      compulsion.  General phrases like "governance" or "policy framework"
+      are not sufficient — look for explicit legal instruments or sanctions.
+
+  # ------------------------------------------------------------------
+  # 2. Economic Instruments
+  # ------------------------------------------------------------------
+  - id: "economic_instruments"
+    label: "Economic Instruments"
+    short_definition: >-
+      Financial incentives that align private and public goals, including
+      payments for ecosystem services (PES), subsidies, environmental
+      credits, and other market-based mechanisms.
+    analytical_notes: >-
+      The defining logic is financial incentive: payments, compensation,
+      transfers, subsidies, credits, and market mechanisms that make
+      conservation financially attractive.  Government-funded PES schemes
+      belong here even though they involve the state; the behavioural
+      driver is financial incentive, not legal compulsion.  Carbon/
+      biodiversity credits and market-based offset programmes belong here.
+    inclusion_cues:
       - "payment for ecosystem services"
       - "PES"
+      - "subsidy"
+      - "fiscal incentive"
+      - "reforestation subsidy"
+      - "restoration subsidy"
+      - "environmental credit"
       - "carbon credit"
+      - "biodiversity credit"
+      - "carbon offset"
       - "offset"
       - "carbon market"
+      - "emissions trading"
+      - "cap and trade"
+      - "carbon pricing"
+      - "carbon tax"
+      - "environmental tax"
+      - "market-based"
+      - "market mechanism"
+      - "economic incentive"
+      - "financial incentive"
+      - "compensation"
+      - "transfer"
+      - "REDD+"
+      - "REDD"
+      - "results-based payment"
+      - "price signal"
+      - "green bond"
+      - "conservation finance"
+      - "performance payment"
     exclusion_cues:
       - "command and control"
       - "direct regulation"
       - "mandatory standard"
-    must_have:
-      - ["market", "price", "economic"]
-      - ["incentive", "mechanism", "instrument"]
-    
-  - id: "regulatory_approach"
-    label: "Regulatory Approach" 
-    short_definition: "Traditional command-and-control regulatory instruments"
-    inclusion_cues:
-      - "regulation"
-      - "standard"
-      - "mandate"
-      - "requirement"
-      - "compliance"
-      - "enforcement"
+      - "sanction"
       - "penalty"
-      - "ban"
-      - "prohibition"
-      - "permitting"
-      - "licensing"
-      - "command and control"
-    exclusion_cues:
-      - "voluntary"
-      - "market-based"
-      - "incentive"
     must_have:
-      - ["regulation", "standard", "mandate"]
-      - ["compliance", "enforcement", "requirement"]
+      - ["payment", "subsidy", "credit", "incentive", "tax", "market",
+         "offset", "PES", "REDD", "compensation", "transfer", "bond",
+         "pricing", "finance", "fiscal"]
+      - ["economic", "financial", "market", "fiscal", "monetary",
+         "payment", "subsidy", "credit", "incentive", "pricing",
+         "compensation"]
+    positive_examples:
+      - "The PES programme compensates landowners for maintaining forest cover on their properties."
+      - "REDD+ results-based payments reward verified emission reductions from avoided deforestation."
+      - "The carbon credit market provides financial incentives for reforestation projects."
+    false_positive_notes: >-
+      Do not classify under economic instruments when the text only uses
+      words like "cost" or "value" in a descriptive context without
+      identifying a specific financial mechanism.  General statements
+      about "the economic value of forests" are not economic instruments.
 
-  - id: "participatory_governance"
-    label: "Participatory Governance"
-    short_definition: "Approaches emphasizing stakeholder participation and collaborative governance"
+  # ------------------------------------------------------------------
+  # 3. Self-Regulation
+  # ------------------------------------------------------------------
+  - id: "self_regulation"
+    label: "Self-Regulation"
+    short_definition: >-
+      Collective industry-developed norms and standards, including
+      certification schemes, sectoral codes of practice, and
+      environmental management systems with peer accountability.
+    analytical_notes: >-
+      The defining logic is collective industry governance: rules
+      developed by firms or industry bodies, peer accountability,
+      market-embedded compliance, and sector-wide standards.
+      Certification (e.g. FSC, PEFC) belongs here when framed as a
+      collective sectoral governance mechanism.  Do NOT classify
+      individual company pledges as self-regulation — those belong
+      under voluntarism.  The key distinction is collective vs
+      unilateral: self-regulation involves sector-wide or multi-actor
+      standard-setting.
     inclusion_cues:
-      - "stakeholder engagement"
-      - "participation"
-      - "collaborative governance"
-      - "co-management"
-      - "multi-stakeholder"
-      - "inclusive"
-      - "deliberative"
-      - "consensus"
-      - "consultation"
-      - "community involvement"
-      - "civil society"
-      - "bottom-up"
+      - "certification"
+      - "FSC"
+      - "PEFC"
+      - "certified"
+      - "chain of custody"
+      - "code of practice"
+      - "code of conduct"
+      - "industry standard"
+      - "sector standard"
+      - "sectoral standard"
+      - "environmental management system"
+      - "EMS"
+      - "ISO 14001"
+      - "self-regulation"
+      - "self-regulatory"
+      - "industry code"
+      - "industry body"
+      - "industry association"
+      - "multi-stakeholder standard"
+      - "peer review"
+      - "peer accountability"
+      - "collective standard"
+      - "roundtable"
+      - "RSPO"
+      - "legality verification"
     exclusion_cues:
-      - "top-down"
-      - "centralized"
-      - "technocratic"
+      - "unilateral"
+      - "individual company"
+      - "corporate pledge"
+      - "non-binding commitment"
+      - "voluntary commitment"
     must_have:
-      - ["stakeholder", "participation", "collaborative"]
-      - ["engagement", "involvement", "inclusive"]
+      - ["certification", "code", "standard", "FSC", "PEFC", "ISO",
+         "self-regulation", "industry", "sector", "roundtable", "RSPO",
+         "collective", "peer", "EMS"]
+      - ["industry", "sector", "collective", "certification", "standard",
+         "code", "peer", "scheme", "system", "roundtable", "verified"]
+    positive_examples:
+      - "The FSC certification scheme sets collective standards for sustainable forest management across the industry."
+      - "Industry associations developed codes of practice for reduced-impact logging operations."
+      - "The sectoral roundtable established peer-reviewed sustainability criteria for timber production."
+    false_positive_notes: >-
+      Individual company pledges or commitments are voluntarism, not
+      self-regulation.  Certification counts as self-regulation ONLY
+      when presented as a collective market-governance or sectoral
+      standard mechanism.  A single company obtaining certification is
+      borderline — classify as self-regulation only if the text
+      emphasises the collective/sectoral nature of the scheme.
 
-  - id: "adaptive_management"
-    label: "Adaptive Management"
-    short_definition: "Management approaches that emphasize learning, flexibility, and iterative adjustment"
+  # ------------------------------------------------------------------
+  # 4. Voluntarism
+  # ------------------------------------------------------------------
+  - id: "voluntarism"
+    label: "Voluntarism"
+    short_definition: >-
+      Unilateral non-binding commitments by individual firms or actors,
+      including corporate pledges, voluntary environmental commitments,
+      and reputation-driven actions.
+    analytical_notes: >-
+      The defining logic is unilateral, non-binding commitment: actor-
+      specific pledges without collective enforcement or sector-wide
+      rules.  Motivation often comes from reputation, stakeholder
+      pressure, or CSR strategies.  If the commitment is part of a
+      collective industry standard or certification scheme, classify
+      under self-regulation instead.  The key test: is this a single
+      actor's commitment (voluntarism) or a collective sector norm
+      (self-regulation)?
     inclusion_cues:
-      - "adaptive management"
-      - "learning by doing"
-      - "iterative"
-      - "flexibility"
-      - "monitoring and evaluation"
-      - "feedback loop"
-      - "adjustment"
-      - "experimentation"
-      - "pilot project"
-      - "trial and error"
-      - "continuous improvement"
-      - "evidence-based"
+      - "voluntary commitment"
+      - "corporate pledge"
+      - "company pledge"
+      - "zero-deforestation pledge"
+      - "zero deforestation commitment"
+      - "deforestation-free"
+      - "non-binding"
+      - "voluntary agreement"
+      - "corporate social responsibility"
+      - "CSR"
+      - "sustainability pledge"
+      - "voluntary action"
+      - "self-commitment"
+      - "corporate commitment"
+      - "supply-chain commitment"
+      - "buyer commitment"
+      - "responsible sourcing"
+      - "company policy"
     exclusion_cues:
-      - "rigid"
-      - "fixed"
-      - "predetermined"
+      - "collective standard"
+      - "industry code"
+      - "sector-wide"
+      - "legally binding"
+      - "mandatory"
+      - "regulation"
+      - "certification scheme"
     must_have:
-      - ["adaptive", "flexible", "iterative"]
-      - ["learning", "monitoring", "feedback"]
+      - ["voluntary", "pledge", "commitment", "non-binding",
+         "corporate", "company", "CSR", "deforestation-free",
+         "responsible", "self-commitment"]
+      - ["pledge", "commitment", "voluntary", "non-binding",
+         "company", "corporate", "individual", "unilateral",
+         "responsible", "deforestation-free"]
+    positive_examples:
+      - "The company pledged to eliminate deforestation from its supply chain by 2025."
+      - "Several major commodity traders made voluntary zero-deforestation commitments."
+      - "Corporate sustainability reports document individual company progress toward deforestation-free sourcing."
+    false_positive_notes: >-
+      Do not classify as voluntarism if the commitment is embedded in a
+      collective certification or industry code — that is self-regulation.
+      General sustainability rhetoric ("we care about forests") without a
+      concrete commitment or pledge is not voluntarism.
 
-  - id: "ecosystem_services"
-    label: "Ecosystem Services Framework"
-    short_definition: "Approaches that explicitly value and manage ecosystem services"
+  # ------------------------------------------------------------------
+  # 5. Information Strategies
+  # ------------------------------------------------------------------
+  - id: "information_strategies"
+    label: "Information Strategies"
+    short_definition: >-
+      Governance mechanisms based on information provision, transparency,
+      disclosure, and knowledge production to influence behaviour.
+    analytical_notes: >-
+      The defining logic is changing behaviour through information
+      availability: reporting, disclosure, traceability, supply-chain
+      monitoring, transparency, and evidence/knowledge tools.  Classify
+      here when the text presents these as governance mechanisms, not
+      when they are merely descriptive background.  Research and
+      evidence production belong here ONLY when framed as a policy tool
+      (e.g. "establishing a monitoring system to inform policy") — not
+      when citing academic studies as background.  Supply-chain
+      transparency and trade-data disclosure are strong signals.
+      Monitoring without legal compulsion belongs here (contrast with
+      command-and-control where monitoring enforces compliance).
     inclusion_cues:
-      - "ecosystem services"
-      - "natural capital"
-      - "biodiversity"
-      - "ecosystem function"
-      - "provisioning services"
-      - "regulating services"
-      - "cultural services"
-      - "supporting services"
-      - "ecosystem valuation"
-      - "green infrastructure"
-      - "nature-based solutions"
-      - "NbS"
+      - "transparency"
+      - "disclosure"
+      - "reporting"
+      - "environmental reporting"
+      - "supply-chain monitoring"
+      - "supply chain transparency"
+      - "traceability"
+      - "timber tracking"
+      - "trade data"
+      - "public information"
+      - "information system"
+      - "knowledge management"
+      - "decision-support"
+      - "early warning"
+      - "monitoring system"
+      - "forest monitoring"
+      - "satellite monitoring"
+      - "remote sensing"
+      - "open data"
+      - "data sharing"
+      - "public registry"
+      - "global forest watch"
+      - "due diligence"
     exclusion_cues:
-      - "purely technological"
-      - "engineered solution"
+      - "enforcement"
+      - "sanction"
+      - "penalty"
+      - "legally binding"
+      - "mandatory compliance"
     must_have:
-      - ["ecosystem", "natural", "biodiversity"]
-      - ["services", "capital", "function"]
-
-  - id: "precautionary_principle"
-    label: "Precautionary Principle"
-    short_definition: "Policy approaches emphasizing caution in the face of uncertainty"
-    inclusion_cues:
-      - "precautionary principle"
-      - "precaution"
-      - "uncertainty"
-      - "risk aversion"
-      - "safety first"
-      - "better safe than sorry"
-      - "preventive action"
-      - "burden of proof"
-      - "scientific uncertainty"
-      - "irreversible harm"
-    exclusion_cues:
-      - "risk-taking"
-      - "innovation first"
-      - "economic priority"
-    must_have:
-      - ["precautionary", "precaution", "uncertainty"]
-      - ["risk", "prevention", "safety"]
-
-  - id: "innovation_systems"
-    label: "Innovation Systems"
-    short_definition: "Policies focused on fostering innovation networks and technological development"
-    inclusion_cues:
-      - "innovation system"
-      - "research and development"
-      - "R&D"
-      - "technology transfer"
-      - "knowledge sharing"
-      - "innovation network"
-      - "cluster"
-      - "entrepreneur"
-      - "startup"
-      - "venture capital"
-      - "patent"
-      - "intellectual property"
-      - "technological change"
-    exclusion_cues:
-      - "traditional methods"
-      - "status quo"
-    must_have:
-      - ["innovation", "research", "technology"]
-      - ["development", "knowledge", "network"]
-
-  - id: "multilevel_governance"
-    label: "Multilevel Governance"
-    short_definition: "Governance approaches spanning multiple jurisdictional levels"
-    inclusion_cues:
-      - "multilevel governance"
-      - "multi-level"
-      - "subsidiarity"
-      - "federalism"
-      - "decentralization"
-      - "local government"
-      - "regional authority"
-      - "national policy"
-      - "international cooperation"
-      - "jurisdictional"
-      - "intergovernmental"
-      - "cross-border"
-    exclusion_cues:
-      - "single level"
-      - "centralized only"
-    must_have:
-      - ["multilevel", "multi-level", "jurisdictional"]
-      - ["governance", "cooperation", "coordination"]
+      - ["transparency", "disclosure", "reporting", "traceability",
+         "monitoring", "information", "data", "knowledge", "tracking",
+         "surveillance", "registry", "due diligence"]
+      - ["transparency", "disclosure", "reporting", "traceability",
+         "information", "data", "knowledge", "monitoring", "tracking",
+         "decision", "awareness", "evidence", "due diligence"]
+    positive_examples:
+      - "The government established a satellite-based forest monitoring system to track deforestation in real time."
+      - "Supply-chain traceability requirements ensure that buyers can verify the origin of timber products."
+      - "Public disclosure of trade data enables civil society to monitor compliance with sustainability commitments."
+    false_positive_notes: >-
+      Do not classify ordinary academic citations or background literature
+      as information strategies.  The text must present information
+      provision, transparency, or disclosure as an active governance tool
+      or behavioural mechanism, not merely describe the existence of data.
+      Phrases like "studies show" or "research indicates" are background,
+      not an information strategy unless the document explicitly proposes
+      using research as a policy instrument.
