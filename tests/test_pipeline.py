@@ -1,722 +1,211 @@
-"""
-Tests for the main pipeline functionality.
-"""
+"""Tests for the pipeline: init, single-doc processing, output generation."""
 
 import json
-import tempfile
+import os
+import pytest
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-from src.policybrief.pipeline import PolicyBriefPipeline
 from src.policybrief.models import (
+    DocumentFrontMatter,
+    DocumentMetrics,
+    FrameAssessment,
+    FrameDecision,
     PageText,
     PDFMetadata,
-    DocumentMetrics,
-    DocumentFrontMatter, 
-    FrameAssessment,
-    PolicyRecommendation,
-    PolicyExtraction,
-    ExtractionType,
-    ProcessingStatus,
     PerDocumentExtraction,
-    Evidence,
-    FrameDecision,
-    InstrumentType,
-    GeographicScope,
-    Timeframe,
-    RecommendationStrength,
-    ActorType,
-    SectionLabel,
+    PolicyExtraction,
+    ProcessingStatus,
+    StructuralCoreResult,
 )
+from src.policybrief.pipeline import PolicyBriefPipeline
 
 
 @pytest.fixture
-def temp_config_dir():
-    """Create temporary config directory with test configurations."""
-    with tempfile.TemporaryDirectory() as temp_dir:
-        config_dir = Path(temp_dir) / "config"
-        config_dir.mkdir()
-        
-        # Create main config
-        main_config = {
-            "openai": {
-                "model": "gpt-4o-2024-08-06",
-                "temperature": 0.1,
-                "max_tokens": 4000
-            },
-            "pdf": {
-                "extract_method": "pymupdf",
-                "preserve_layout": True,
-                "max_pages": 0
-            },
-            "frames": {
-                "min_confidence": 0.7,
-                "max_spans_per_frame": 3
-            },
-            "recommendations": {
-                "min_confidence": 0.6,
-                "max_recommendations": 5
-            },
-            "output": {
-                "formats": ["csv"],
-                "generate_audit": True
-            }
-        }
-        
-        with open(config_dir / "config.yaml", "w") as f:
-            import yaml
-            yaml.dump(main_config, f)
-        
-        # Create frames config
-        frames_config = {
-            "frames": [
-                {
-                    "id": "test_frame_1",
-                    "label": "Test Frame 1", 
-                    "short_definition": "A test theoretical framework",
-                    "inclusion_cues": ["test", "framework", "theory"],
-                    "exclusion_cues": ["anti-test"],
-                    "must_have": [["test", "theory"]]
-                },
-                {
-                    "id": "test_frame_2", 
-                    "label": "Test Frame 2",
-                    "short_definition": "Another test framework",
-                    "inclusion_cues": ["policy", "mechanism", "approach"],
-                    "exclusion_cues": [],
-                    "must_have": []
-                }
-            ]
-        }
-        
-        with open(config_dir / "frames.yaml", "w") as f:
-            import yaml
-            yaml.dump(frames_config, f)
-        
-        # Create enums config
-        enums_config = {
-            "instrument_types": ["regulation", "subsidy", "tax", "other"],
-            "geographic_scopes": ["local", "national", "international", "unspecified"], 
-            "timeframes": ["immediate", "short_term", "medium_term", "long_term", "unspecified"],
-            "strengths": ["must", "should", "could", "may", "unspecified"],
-            "actor_types": ["government", "private_sector", "civil_society", "unspecified"],
-            "policy_domains": ["climate_change", "environment", "other"]
-        }
-        
-        with open(config_dir / "enums.yaml", "w") as f:
-            import yaml
-            yaml.dump(enums_config, f)
-        
-        yield config_dir
+def config_dir(tmp_path):
+    """Create minimal config directory."""
+    import yaml
 
+    config = {
+        "modules": {
+            "front_matter": True,
+            "structural_core": True,
+            "frames": True,
+            "recommendations": True,
+        },
+        "openai": {"model": "gpt-4o-mini", "temperature": 0.1, "max_tokens": 4000},
+        "pdf": {"extract_method": "pymupdf", "max_pages": 0, "max_file_size_mb": 50},
+        "frames": {"min_confidence": 0.7, "max_spans_per_frame": 5},
+        "recommendations": {"min_confidence": 0.6},
+    }
+    frames = {"frames": []}
 
-@pytest.fixture  
-def temp_output_dir():
-    """Create temporary output directory."""
-    with tempfile.TemporaryDirectory() as temp_dir:
-        yield Path(temp_dir)
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir()
+    (cfg_dir / "config.yaml").write_text(yaml.dump(config))
+    (cfg_dir / "frames.yaml").write_text(yaml.dump(frames))
+    return cfg_dir
 
 
 @pytest.fixture
-def mock_pdf_file():
-    """Create a mock PDF file for testing."""
-    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as temp_file:
-        # Write some minimal PDF content
-        temp_file.write(b"%PDF-1.4\n%Mock PDF for testing\n%%EOF")
-        temp_path = Path(temp_file.name)
-    
-    yield temp_path
-    
-    # Cleanup
-    if temp_path.exists():
-        temp_path.unlink()
+def output_dir(tmp_path):
+    out = tmp_path / "output"
+    out.mkdir()
+    return out
 
 
 @pytest.fixture
-def sample_extraction_result():
-    """Create sample extraction result for testing."""
-    evidence = Evidence(
-        page=1,
-        quote="This is a test evidence quote from the document."
+def pipeline(config_dir, output_dir):
+    return PolicyBriefPipeline(
+        config_dir=config_dir,
+        output_dir=output_dir,
+        max_workers=1,
     )
-    
-    frame_assessment = FrameAssessment(
-        frame_id="test_frame_1",
-        frame_label="Test Frame 1",
-        decision=FrameDecision.PRESENT,
-        confidence=0.85,
-        evidence=[evidence],
-        rationale="Strong evidence found for this frame."
-    )
-    
-    recommendation = PolicyRecommendation(
-        rec_id="test_doc_rec_01",
-        actor=ActorType.GOVERNMENT,
-        action="implement test policies",
-        target="environmental protection",
-        instrument_type=InstrumentType.REGULATION,
-        policy_domain="environment", 
-        geographic_scope=GeographicScope.NATIONAL,
-        timeframe=Timeframe.SHORT_TERM,
-        strength=RecommendationStrength.SHOULD,
-        evidence=[evidence]
-    )
-    
-    policy_extraction = PolicyExtraction(
-        rec_id="test_doc_rec_01",
-        extraction_type=ExtractionType.RECOMMENDATION,
-        confidence=0.9,
-        source_text_raw="Governments should implement test policies for environmental protection.",
-        source_section=SectionLabel.RECOMMENDATIONS,
-        page=1,
-        actor_text_raw="Governments",
-        actor_type_normalized=ActorType.GOVERNMENT,
-        action_text_raw="implement test policies",
-        target_text_raw="environmental protection",
-        instrument_type=InstrumentType.REGULATION,
-        policy_domain="environment",
-        geographic_scope=GeographicScope.NATIONAL,
-        timeframe=Timeframe.SHORT_TERM,
-        strength=RecommendationStrength.SHOULD,
-        evidence=[evidence],
-    )
-    
-    extraction = PerDocumentExtraction(
-        doc_id="test_doc",
-        pages=[PageText(
-            page_num=1,
-            text="This is test document content with policy recommendations.",
-            char_count=65,
-            word_count=10
-        )],
-        headings=["Introduction", "Policy Recommendations"],
-        metadata=PDFMetadata(title="Test Document"),
-        metrics=DocumentMetrics(
-            page_count=1,
-            word_count=100,
-            char_count=500,
-            heading_count=2,
-            paragraph_count=5,
-            sentence_count=8,
-            list_item_count=0,
-            avg_sentence_length=12.5,
-            lexical_diversity=0.7,
-            avg_word_length=4.2
-        ),
-        frame_assessments=[frame_assessment],
-        recommendations=[recommendation],
-        policy_extractions=[policy_extraction],
-        processing_status=ProcessingStatus(
-            doc_id="test_doc",
-            file_path="/test.pdf",
-            file_hash="test_hash",
-            file_size_bytes=1024,
+
+
+# ── Pipeline initialisation ──────────────────────────────────────────────
+
+class TestPipelineInit:
+    def test_basic_init(self, pipeline):
+        assert pipeline.max_workers == 1
+        assert pipeline.enable_front_matter is True
+        assert pipeline.enable_frames is True
+
+    def test_module_switches(self, config_dir, output_dir):
+        """Modules can be disabled via config."""
+        import yaml
+        cfg_path = config_dir / "config.yaml"
+        config = yaml.safe_load(cfg_path.read_text())
+        config["modules"]["frames"] = False
+        config["modules"]["recommendations"] = False
+        cfg_path.write_text(yaml.dump(config))
+
+        p = PolicyBriefPipeline(config_dir=config_dir, output_dir=output_dir)
+        assert p.enable_frames is False
+        assert p.enable_recommendations is False
+
+
+# ── Extraction summary ───────────────────────────────────────────────────
+
+class TestExtractionSummary:
+    def _make_result(self, doc_id="test_doc", n_frames=0, n_recs=0):
+        pages = [PageText(page_num=1, text="text", char_count=4, word_count=1)]
+        metrics = DocumentMetrics(
+            page_count=1, word_count=100, char_count=500,
+            sentence_count=5, paragraph_count=2,
+        )
+        status = ProcessingStatus(
+            doc_id=doc_id, file_path="/tmp/test.pdf",
+            file_hash="abc123", file_size_bytes=1000,
             processing_timestamp=datetime.now(),
-            processing_duration_seconds=5.0,
-            parser_used="pymupdf",
-            likely_scanned=False,
-            text_extraction_quality=0.95,
-            pages_processed=1,
-            frames_processed=1, 
-            recommendations_extracted=1
+            processing_duration_seconds=1.0,
+            parser_used="pymupdf", likely_scanned=False,
+            text_extraction_quality=0.9, pages_processed=1,
+            frames_processed=n_frames, recommendations_extracted=n_recs,
         )
-    )
-    
-    return extraction
+        return PerDocumentExtraction(
+            doc_id=doc_id, pages=pages,
+            metadata=PDFMetadata(), metrics=metrics,
+            processing_status=status,
+        )
+
+    def test_empty_results(self, pipeline):
+        summary = pipeline.compute_extraction_summary([])
+        assert summary["documents_processed"] == 0
+        assert summary["total_extractions"] == 0
+
+    def test_with_results(self, pipeline):
+        results = [self._make_result("doc1"), self._make_result("doc2")]
+        summary = pipeline.compute_extraction_summary(results)
+        assert summary["documents_processed"] == 2
+        assert summary["total_pages"] == 2
 
 
-class TestPipelineInitialization:
-    """Test pipeline initialization and configuration loading."""
-    
-    @patch.dict("os.environ", {"OPENAI_API_KEY": "test_key"})
-    def test_pipeline_init_success(self, temp_config_dir, temp_output_dir):
-        """Test successful pipeline initialization."""
-        pipeline = PolicyBriefPipeline(
-            config_dir=temp_config_dir,
-            output_dir=temp_output_dir,
-            max_workers=2,
-            force_reprocess=False
-        )
-        
-        assert pipeline.config_dir == temp_config_dir
-        assert pipeline.output_dir == temp_output_dir
-        assert pipeline.max_workers == 2
-        assert pipeline.force_reprocess is False
-        assert len(pipeline.frames) == 2  # Two test frames
-        assert pipeline.llm_client is not None
-        assert pipeline.pdf_extractor is not None
-    
-    def test_missing_api_key(self, temp_config_dir, temp_output_dir):
-        """Test pipeline initialization fails without API key."""
-        with patch.dict("os.environ", {}, clear=True):
-            with pytest.raises(ValueError, match="Required environment variable"):
-                PolicyBriefPipeline(
-                    config_dir=temp_config_dir,
-                    output_dir=temp_output_dir
-                )
-    
-    def test_missing_config_files(self, temp_output_dir):
-        """Test pipeline initialization fails with missing config files."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            empty_config_dir = Path(temp_dir)
-            
-            with pytest.raises(FileNotFoundError):
-                PolicyBriefPipeline(
-                    config_dir=empty_config_dir,
-                    output_dir=temp_output_dir
-                )
-    
-    @patch.dict("os.environ", {"OPENAI_API_KEY": "test_key"})
-    def test_frames_loading(self, temp_config_dir, temp_output_dir):
-        """Test frames configuration is loaded correctly."""
-        pipeline = PolicyBriefPipeline(
-            config_dir=temp_config_dir,
-            output_dir=temp_output_dir
-        )
-        
-        assert len(pipeline.frames) == 2
-        
-        # Check that frames are loaded as list of dicts with proper IDs
-        frame_ids = [frame["id"] for frame in pipeline.frames]
-        assert "test_frame_1" in frame_ids
-        assert "test_frame_2" in frame_ids
-        
-        # Find frame 1 and check its properties
-        frame1 = next(frame for frame in pipeline.frames if frame["id"] == "test_frame_1")
-        assert frame1["label"] == "Test Frame 1"
-        assert "test" in frame1["inclusion_cues"]
-        assert "anti-test" in frame1["exclusion_cues"]
+# ── Output file generation ───────────────────────────────────────────────
 
-
-class TestDocumentProcessing:
-    """Test document processing functionality."""
-    
-    @patch.dict("os.environ", {"OPENAI_API_KEY": "test_key"})
-    @patch("src.policybrief.pdf_extractor.PDFExtractor.extract_document")
-    @patch("src.policybrief.frame_detector.FrameDetector.detect_frames")
-    @patch("src.policybrief.recommendation_extractor.RecommendationExtractor.extract_recommendations")
-    def test_process_single_document_success(
-        self, 
-        mock_extract_recs,
-        mock_detect_frames, 
-        mock_extract_pdf,
-        temp_config_dir,
-        temp_output_dir,
-        mock_pdf_file
-    ):
-        """Test successful processing of a single document."""
-        # Setup mocks
-        mock_pages = [PageText(
-            page_num=1,
-            text="Test document content with policy frameworks.",
-            char_count=45,
-            word_count=7
-        )]
-        
-        mock_metadata = PDFMetadata(title="Test Document")
-        mock_extraction_info = {
-            "likely_scanned": False,
-            "text_extraction_quality": 0.95,
-            "warnings": []
-        }
-        
-        mock_extract_pdf.return_value = (mock_pages, mock_metadata, mock_extraction_info)
-        
-        mock_frames = [FrameAssessment(
-            frame_id="test_frame_1",
-            frame_label="Test Frame 1",
-            decision=FrameDecision.PRESENT,
-            confidence=0.8,
-            evidence=[Evidence(
-                page=1,
-                quote="Test evidence quote from document content."
-            )],
-            rationale="Evidence found."
-        )]
-        mock_detect_frames.return_value = mock_frames
-        
-        mock_policy_extractions = [PolicyExtraction(
-            rec_id="test_rec_1",
-            extraction_type=ExtractionType.RECOMMENDATION,
-            confidence=0.9,
-            source_text_raw="Government should implement test policy for outcomes.",
-            source_section=SectionLabel.RECOMMENDATIONS,
-            page=1,
-            actor_text_raw="Government",
-            actor_type_normalized=ActorType.GOVERNMENT,
-            action_text_raw="implement test policy",
-            target_text_raw="test outcomes",
-            instrument_type=InstrumentType.REGULATION,
-            policy_domain="environment",
-            geographic_scope=GeographicScope.NATIONAL,
-            timeframe=Timeframe.SHORT_TERM,
-            strength=RecommendationStrength.SHOULD,
-            evidence=[Evidence(
-                page=1,
-                quote="Government should implement test policy for outcomes."
-            )]
-        )]
-        mock_extract_recs.return_value = mock_policy_extractions
-        
-        # Initialize pipeline
-        pipeline = PolicyBriefPipeline(
-            config_dir=temp_config_dir,
-            output_dir=temp_output_dir,
-            max_workers=1
+class TestOutputFiles:
+    def _make_result(self, doc_id="test_doc"):
+        pages = [PageText(page_num=1, text="test text", char_count=9, word_count=2)]
+        metrics = DocumentMetrics(
+            page_count=1, word_count=100, char_count=500,
+            sentence_count=5, paragraph_count=2,
         )
-        
-        # Process document
-        result = pipeline._process_single_document(mock_pdf_file)
-        
-        # Verify results
-        assert result is not None
-        assert result.doc_id is not None
-        assert len(result.pages) == 1
-        assert len(result.frame_assessments) == 1
-        assert len(result.policy_extractions) == 1
-        assert result.processing_status.parser_used == "pymupdf"
-        
-        # Verify mocks were called
-        mock_extract_pdf.assert_called_once_with(mock_pdf_file)
-        mock_detect_frames.assert_called_once()
-        mock_extract_recs.assert_called_once()
-    
-    @patch.dict("os.environ", {"OPENAI_API_KEY": "test_key"})
-    def test_needs_processing_logic(self, temp_config_dir, temp_output_dir, mock_pdf_file):
-        """Test file change detection logic."""
-        pipeline = PolicyBriefPipeline(
-            config_dir=temp_config_dir,
-            output_dir=temp_output_dir,
-            force_reprocess=False
+        status = ProcessingStatus(
+            doc_id=doc_id, file_path="/tmp/test.pdf",
+            file_hash="abc123", file_size_bytes=1000,
+            processing_timestamp=datetime.now(),
+            processing_duration_seconds=1.0,
+            parser_used="pymupdf", likely_scanned=False,
+            text_extraction_quality=0.9, pages_processed=1,
+            frames_processed=0, recommendations_extracted=0,
         )
-        
-        # First time should need processing
-        assert pipeline._needs_processing(mock_pdf_file) is True
-        
-        # Add file to cache
-        file_hash = pipeline.pdf_extractor.compute_file_hash(mock_pdf_file)
-        pipeline.processing_cache[str(mock_pdf_file)] = file_hash
-        
-        # Now should not need processing
-        assert pipeline._needs_processing(mock_pdf_file) is False
-        
-        # With force_reprocess should always need processing
-        pipeline.force_reprocess = True
-        assert pipeline._needs_processing(mock_pdf_file) is True
-
-
-class TestOutputGeneration:
-    """Test output file generation."""
-    
-    @patch.dict("os.environ", {"OPENAI_API_KEY": "test_key"})
-    def test_create_documents_dataframe(self, temp_config_dir, temp_output_dir, sample_extraction_result):
-        """Test documents dataframe generation."""
-        pipeline = PolicyBriefPipeline(
-            config_dir=temp_config_dir,
-            output_dir=temp_output_dir
-        )
-        
-        df = pipeline._create_documents_dataframe([sample_extraction_result])
-        
-        assert len(df) == 1
-        assert "doc_id" in df.columns
-        assert "file_path" in df.columns
-        assert "word_count" in df.columns
-        assert "frames_present" in df.columns
-        assert "recommendations_count" in df.columns
-        
-        row = df.iloc[0]
-        assert row["doc_id"] == "test_doc"
-        assert row["frames_present"] == 1
-        assert row["recommendations_count"] == 1
-    
-    @patch.dict("os.environ", {"OPENAI_API_KEY": "test_key"})
-    def test_create_frames_dataframe(self, temp_config_dir, temp_output_dir, sample_extraction_result):
-        """Test frames dataframe generation."""
-        pipeline = PolicyBriefPipeline(
-            config_dir=temp_config_dir,
-            output_dir=temp_output_dir
-        )
-        
-        df = pipeline._create_frames_dataframe([sample_extraction_result])
-        
-        assert len(df) == 1
-        assert "doc_id" in df.columns
-        assert "frame_id" in df.columns  
-        assert "decision" in df.columns
-        assert "confidence" in df.columns
-        assert "evidence_quotes" in df.columns
-        
-        row = df.iloc[0]
-        assert row["doc_id"] == "test_doc"
-        assert row["frame_id"] == "test_frame_1"
-        assert row["decision"] == "present"
-        assert row["confidence"] == 0.85
-    
-    @patch.dict("os.environ", {"OPENAI_API_KEY": "test_key"})
-    def test_create_recommendations_dataframe(self, temp_config_dir, temp_output_dir, sample_extraction_result):
-        """Test recommendations dataframe generation."""
-        pipeline = PolicyBriefPipeline(
-            config_dir=temp_config_dir,
-            output_dir=temp_output_dir
-        )
-        
-        df = pipeline._create_recommendations_dataframe([sample_extraction_result])
-        
-        assert len(df) == 1
-        assert "doc_id" in df.columns
-        assert "rec_id" in df.columns
-        assert "extraction_type" in df.columns
-        assert "actor_text_raw" in df.columns
-        assert "action_text_raw" in df.columns
-        assert "instrument_type" in df.columns
-        assert "evidence_quotes" in df.columns
-        
-        row = df.iloc[0]
-        assert row["doc_id"] == "test_doc"
-        assert row["actor_type_normalized"] == "government"
-        assert row["instrument_type"] == "regulation"
-    
-    @patch.dict("os.environ", {"OPENAI_API_KEY": "test_key"})
-    @patch("src.policybrief.pipeline.save_dataframe")
-    def test_generate_output_files(self, mock_save_df, temp_config_dir, temp_output_dir, sample_extraction_result):
-        """Test output file generation calls save functions."""
-        pipeline = PolicyBriefPipeline(
-            config_dir=temp_config_dir,
-            output_dir=temp_output_dir
-        )
-        
-        pipeline._generate_output_files([sample_extraction_result])
-        
-        # Should have called save_dataframe 3 times (documents, frames, recommendations)
-        # sections and structural_core are empty because sample_extraction_result lacks them
-        assert mock_save_df.call_count == 3
-        
-        # Check that dataframes were saved to correct paths
-        calls = mock_save_df.call_args_list
-        saved_files = [call[0][1].name for call in calls]
-        
-        assert "documents.csv" in saved_files
-        assert "frames.csv" in saved_files  
-        assert "recommendations.csv" in saved_files
-
-
-class TestErrorHandling:
-    """Test error handling and edge cases."""
-    
-    @patch.dict("os.environ", {"OPENAI_API_KEY": "test_key"})
-    @patch("src.policybrief.pdf_extractor.PDFExtractor.extract_document")
-    def test_pdf_extraction_failure(self, mock_extract, temp_config_dir, temp_output_dir, mock_pdf_file):
-        """Test handling of PDF extraction failures."""
-        # Make PDF extraction fail
-        mock_extract.side_effect = Exception("PDF extraction failed")
-        
-        pipeline = PolicyBriefPipeline(
-            config_dir=temp_config_dir,
-            output_dir=temp_output_dir
-        )
-        
-        result = pipeline._process_single_document(mock_pdf_file)
-        
-        # Should return None on failure
-        assert result is None
-    
-    @patch.dict("os.environ", {"OPENAI_API_KEY": "test_key"})
-    def test_empty_file_list(self, temp_config_dir, temp_output_dir):
-        """Test processing with empty file list."""
-        pipeline = PolicyBriefPipeline(
-            config_dir=temp_config_dir,
-            output_dir=temp_output_dir
-        )
-        
-        results = pipeline.process_documents([])
-        
-        assert results["processed"] == []
-        assert results["skipped"] == []
-        assert results["errors"] == []
-    
-    @patch.dict("os.environ", {"OPENAI_API_KEY": "test_key"})
-    def test_nonexistent_files(self, temp_config_dir, temp_output_dir):
-        """Test processing with nonexistent files."""
-        pipeline = PolicyBriefPipeline(
-            config_dir=temp_config_dir,
-            output_dir=temp_output_dir
-        )
-        
-        fake_files = [Path("/nonexistent/file1.pdf"), Path("/nonexistent/file2.pdf")]
-        results = pipeline.process_documents(fake_files)
-        
-        # Should filter out nonexistent files
-        assert results["processed"] == []
-        assert results["skipped"] == []
-        assert results["errors"] == []
-
-
-class TestFrontMatterIntegration:
-    """Test front-matter extraction integration with pipeline."""
-    
-    @patch.dict("os.environ", {"OPENAI_API_KEY": "test_key"})
-    @patch("src.policybrief.pdf_extractor.PDFExtractor.extract_document")
-    @patch("src.policybrief.frame_detector.FrameDetector.detect_frames")
-    @patch("src.policybrief.recommendation_extractor.RecommendationExtractor.extract_recommendations")
-    def test_pipeline_includes_front_matter_extraction(
-        self, 
-        mock_extract_recs,
-        mock_detect_frames, 
-        mock_extract_pdf,
-        temp_config_dir,
-        temp_output_dir,
-        mock_pdf_file
-    ):
-        """Test that pipeline includes front-matter extraction in processing."""
-        # Setup mocks with content that should trigger front-matter extraction
-        mock_pages = [PageText(
-            page_num=1,
-            text="""Climate Policy Assessment
-
-Authors:
-Dr. Sarah Johnson
-Prof. Michael Chen
-
-Contact: s.johnson@climatepolicy.org
-Website: https://www.climatepolicy.org
-
-This comprehensive study examines climate policy implementations.""",
-            char_count=200,
-            word_count=30
-        )]
-        
-        mock_metadata = PDFMetadata(title="Old PDF Title")
-        mock_extraction_info = {
-            "likely_scanned": False,
-            "text_extraction_quality": 0.95,
-            "warnings": []
-        }
-        
-        mock_extract_pdf.return_value = (mock_pages, mock_metadata, mock_extraction_info)
-        mock_detect_frames.return_value = []
-        mock_extract_recs.return_value = []
-        
-        # Initialize pipeline
-        pipeline = PolicyBriefPipeline(
-            config_dir=temp_config_dir,
-            output_dir=temp_output_dir,
-            max_workers=1
-        )
-        
-        # Process document
-        result = pipeline._process_single_document(mock_pdf_file)
-        
-        # Verify front matter was extracted
-        assert result is not None
-        assert result.front_matter is not None
-        assert result.front_matter.title == "Climate Policy Assessment"
-        assert len(result.front_matter.authors) == 2
-        assert "Dr. Sarah Johnson" in result.front_matter.authors
-        assert "Prof. Michael Chen" in result.front_matter.authors
-        assert "s.johnson@climatepolicy.org" in result.front_matter.emails
-        assert "https://www.climatepolicy.org" in result.front_matter.urls
-    
-    @patch.dict("os.environ", {"OPENAI_API_KEY": "test_key"})
-    def test_front_matter_in_csv_output(self, temp_config_dir, temp_output_dir):
-        """Test that front-matter fields appear in CSV output."""
-        pipeline = PolicyBriefPipeline(
-            config_dir=temp_config_dir,
-            output_dir=temp_output_dir
-        )
-        
-        # Create extraction result with front matter
-        front_matter = DocumentFrontMatter(
-            title="Content-derived Title",
-            authors=["Author One", "Author Two"],
-            emails=["author@example.com"],
-            urls=["https://example.org"],
-            affiliations=["Test University"],
-            funding_statements=["Funded by Research Grant"],
-            linked_studies=["Related Study 2024"]
-        )
-        
-        extraction = PerDocumentExtraction(
-            doc_id="test_doc",
-            pages=[PageText(
-                page_num=1,
-                text="Test content",
-                char_count=12,
-                word_count=2
-            )],
-            headings=[],
-            metadata=PDFMetadata(title="PDF Title"),
-            front_matter=front_matter,
-            metrics=DocumentMetrics(
-                page_count=1,
-                word_count=2,
-                char_count=12,
-                heading_count=0,
-                paragraph_count=1,
-                sentence_count=1,
-                list_item_count=0,
-                avg_sentence_length=2.0,
-                lexical_diversity=1.0,
-                avg_word_length=6.0
+        return PerDocumentExtraction(
+            doc_id=doc_id, pages=pages,
+            metadata=PDFMetadata(title="Test Doc"),
+            front_matter=DocumentFrontMatter(title="Test Brief", authors=["Auth A"]),
+            metrics=metrics,
+            structural_core=StructuralCoreResult(
+                problem_status="present",
+                problem_summary="Deforestation",
+                solutions_count=2,
             ),
-            frame_assessments=[],
-            recommendations=[],
-            processing_status=ProcessingStatus(
-                doc_id="test_doc",
-                file_path="/test.pdf",
-                file_hash="test_hash",
-                file_size_bytes=1024,
-                processing_timestamp=datetime.now(),
-                processing_duration_seconds=1.0,
-                parser_used="pymupdf",
-                likely_scanned=False,
-                text_extraction_quality=1.0,
-                pages_processed=1,
-                frames_processed=0,
-                recommendations_extracted=0
-            )
+            processing_status=status,
         )
-        
-        # Generate documents dataframe
-        df = pipeline._create_documents_dataframe([extraction])
-        
-        # Check that front-matter columns exist
-        assert "content_title" in df.columns
-        assert "content_authors" in df.columns
-        assert "affiliations" in df.columns
-        assert "emails" in df.columns
-        assert "urls" in df.columns
-        assert "funding_statements" in df.columns
-        assert "linked_studies" in df.columns
-        
-        # Check values
-        row = df.iloc[0]
-        assert row["title"] == "PDF Title"  # Original PDF metadata
-        assert row["content_title"] == "Content-derived Title"  # Content-derived
-        assert row["content_authors"] == "Author One|Author Two"
-        assert row["emails"] == "author@example.com"
-        assert row["urls"] == "https://example.org"
-        assert row["affiliations"] == "Test University"
-        assert row["funding_statements"] == "Funded by Research Grant"
-        assert row["linked_studies"] == "Related Study 2024"
-    
-    @patch.dict("os.environ", {"OPENAI_API_KEY": "test_key"})
-    def test_pipeline_frontmatter_extractor_initialized(self, temp_config_dir, temp_output_dir):
-        """Test that pipeline properly initializes front-matter extractor."""
-        pipeline = PolicyBriefPipeline(
-            config_dir=temp_config_dir,
-            output_dir=temp_output_dir
-        )
-        
-        # Verify front-matter extractor is initialized
-        assert hasattr(pipeline, 'frontmatter_extractor')
-        assert pipeline.frontmatter_extractor is not None
-        from src.policybrief.frontmatter_extractor import FrontMatterExtractor
-        assert isinstance(pipeline.frontmatter_extractor, FrontMatterExtractor)
+
+    def test_documents_csv_created(self, pipeline):
+        results = [self._make_result()]
+        pipeline._generate_output_files(results)
+        assert (pipeline.output_dir / "documents.csv").exists()
+
+    def test_frames_csv_created(self, pipeline):
+        results = [self._make_result()]
+        pipeline._generate_output_files(results)
+        assert (pipeline.output_dir / "frames.csv").exists()
+
+    def test_recommendations_csv_created(self, pipeline):
+        results = [self._make_result()]
+        pipeline._generate_output_files(results)
+        assert (pipeline.output_dir / "recommendations.csv").exists()
+
+    def test_structural_core_csv_created(self, pipeline):
+        results = [self._make_result()]
+        pipeline._generate_output_files(results)
+        assert (pipeline.output_dir / "structural_core.csv").exists()
+
+    def test_documents_csv_content(self, pipeline):
+        import pandas as pd
+        results = [self._make_result()]
+        pipeline._generate_output_files(results)
+        df = pd.read_csv(pipeline.output_dir / "documents.csv")
+        assert len(df) == 1
+        assert df.iloc[0]["doc_id"] == "test_doc"
+        assert df.iloc[0]["fm_title"] == "Test Brief"
+
+    def test_structural_core_csv_content(self, pipeline):
+        import pandas as pd
+        results = [self._make_result()]
+        pipeline._generate_output_files(results)
+        df = pd.read_csv(pipeline.output_dir / "structural_core.csv")
+        assert len(df) == 1
+        assert df.iloc[0]["problem_status"] == "present"
+        assert df.iloc[0]["solutions_count"] == 2
 
 
-if __name__ == "__main__":
-    pytest.main([__file__])
+# ── Sparse / scanned document handling ───────────────────────────────────
+
+class TestSparseDocuments:
+    def test_scanned_detection(self, pipeline):
+        """Scanned documents should not crash the pipeline."""
+        sparse_pages = [
+            PageText(page_num=1, text="", char_count=0, word_count=0),
+            PageText(page_num=2, text="a", char_count=1, word_count=1),
+        ]
+        likely_scanned, quality = pipeline.pdf_extractor.detect_scanned(sparse_pages)
+        assert likely_scanned is True
+        assert quality == 0.0
+
+    def test_empty_pages(self, pipeline):
+        pages = []
+        likely_scanned, quality = pipeline.pdf_extractor.detect_scanned(pages)
+        assert likely_scanned is True

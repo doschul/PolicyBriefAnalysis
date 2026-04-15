@@ -1,715 +1,425 @@
 """
-Section-aware policy extraction with candidate-span classification.
-
-MIGRATION (Prompt 4): Full rewrite of the original recommendation extractor.
-Key changes:
-  1. Uses the section map to restrict candidate search to target sections
-     (recommendations, key_messages, executive_summary, policy_options,
-     implementation, conclusion) and explicitly excludes references,
-     acknowledgements, about_authors, contact, appendix.
-  2. Generates sentence-level candidate spans first, then classifies only
-     those spans (never the whole document).
-  3. Deterministic pre-filtering: prescriptive-language detection rejects
-     spans that lack any recommendation function before LLM classification.
-  4. LLM prompt uses strict negative examples to reject citations,
-     literature summaries, and generic normative statements.
-  5. Functional validation: a recommendation must have prescriptive
-     language AND an action. Actor is kept null when not explicit.
+Recommendation extraction: references-page exclusion, prescriptive-language
+pre-filter, citation rejection, batch LLM classification, post-validation.
 """
 
 import logging
 import re
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .llm_client import LLMClient
 from .models import (
     ActorType,
     CandidateClassification,
     CandidateClassificationBatch,
-    CandidateSpan,
-    DocumentSectionMap,
     Evidence,
     ExtractionType,
-    GeographicScope,
     InstrumentType,
     PageText,
     PolicyExtraction,
     RecommendationStrength,
-    SectionLabel,
-    Timeframe,
 )
-
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Section targeting
-# ---------------------------------------------------------------------------
+# ── Constants ─────────────────────────────────────────────────────────────
 
-# Sections where genuine recommendations / options are expected
-_TARGET_SECTIONS: Set[SectionLabel] = {
-    SectionLabel.RECOMMENDATIONS,
-    SectionLabel.KEY_MESSAGES,
-    SectionLabel.EXECUTIVE_SUMMARY,
-    SectionLabel.POLICY_OPTIONS,
-    SectionLabel.IMPLEMENTATION,
-    SectionLabel.CONCLUSION,
-}
-
-# Sections that must NEVER contribute candidates
-_EXCLUDED_SECTIONS: Set[SectionLabel] = {
-    SectionLabel.REFERENCES,
-    SectionLabel.ACKNOWLEDGEMENTS,
-    SectionLabel.ABOUT_AUTHORS,
-    SectionLabel.CONTACT,
-    SectionLabel.APPENDIX,
-}
-
-# ---------------------------------------------------------------------------
-# Prescriptive-language lexicon  (word-boundary regex compiled once)
-# ---------------------------------------------------------------------------
-
-# Modal / imperative prescriptive cues
-_PRESCRIPTIVE_CUES: List[str] = [
-    r"\bshould\b",
-    r"\bmust\b",
-    r"\bneeds?\s+to\b",
-    r"\bought\s+to\b",
-    r"\brecommends?\b",
-    r"\bwe\s+recommend\b",
-    r"\bit\s+is\s+recommended\b",
-    r"\bwe\s+propose\b",
-    r"\bpropose(?:s|d)?\b",
-    r"\bcall(?:s|ed)?\s+(?:for|on|upon)\b",
-    r"\burge(?:s|d)?\b",
-    r"\brequire(?:s|d)?\b",
-    r"\bensure\b",
-    r"\bstrengthen\b",
-    r"\bestablish\b",
-    r"\bprioritize\b",
-    r"\bprioritise\b",
-    r"\binvest\s+in\b",
+_REFS_PATTERNS = [
+    re.compile(r"^\s*references?\s*$", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"^\s*bibliography\s*$", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"^\s*works?\s+cited\s*$", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"^\s*literature\s+cited\s*$", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"^\s*endnotes?\s*$", re.IGNORECASE | re.MULTILINE),
 ]
 
-_PRESCRIPTIVE_RE = [re.compile(p, re.IGNORECASE) for p in _PRESCRIPTIVE_CUES]
-
-# ---------------------------------------------------------------------------
-# Reference / citation patterns — used to reject candidate spans
-# ---------------------------------------------------------------------------
-
-_CITATION_PATTERNS: List[re.Pattern] = [
-    # In-text citations: (Author, Year) or (Author et al., Year)
-    re.compile(r"\([A-Z][a-z]+(?:\s+(?:et\s+al\.?|&|and)\s+[A-Z][a-z]+)*,?\s*\d{4}\)"),
-    # Narrative citations: Author (Year) — author name outside parentheses
-    re.compile(r"[A-Z][a-z]+\s+\(\d{4}\)"),
-    # Numbered citations: [1], [1, 2], [1-5]
-    re.compile(r"\[\d+(?:[,\-–]\s*\d+)*\]"),
-    # Reference-list entry starting with author-year
-    re.compile(r"^[A-Z][a-z]+,?\s+[A-Z]\.?\s*(?:,|&|\()\s*(?:\d{4}|\(\d{4}\))"),
-    # DOI links
-    re.compile(r"doi[:\s]+10\.\d{4,}", re.IGNORECASE),
-    # URL patterns typical of bibliography entries
-    re.compile(r"https?://(?:dx\.)?doi\.org/"),
-    # "et al. (YYYY)" mid-sentence — strong citation signal
-    re.compile(r"et\s+al\.?\s*\(?\d{4}\)?"),
+_PRESCRIPTIVE_CUES = [
+    re.compile(r"\bshould\b", re.IGNORECASE),
+    re.compile(r"\bmust\b", re.IGNORECASE),
+    re.compile(r"\bneed\s+to\b", re.IGNORECASE),
+    re.compile(r"\bought\s+to\b", re.IGNORECASE),
+    re.compile(r"\brecommend", re.IGNORECASE),
+    re.compile(r"\bpropose[sd]?\b", re.IGNORECASE),
+    re.compile(r"\bsuggest", re.IGNORECASE),
+    re.compile(r"\bcall[s]?\s+for\b", re.IGNORECASE),
+    re.compile(r"\burge[sd]?\b", re.IGNORECASE),
+    re.compile(r"\brequire[sd]?\b", re.IGNORECASE),
+    re.compile(r"\badvise[sd]?\b", re.IGNORECASE),
+    re.compile(r"\badvocate[sd]?\b", re.IGNORECASE),
+    re.compile(r"\bprioritize\b", re.IGNORECASE),
+    re.compile(r"\bimplement\b", re.IGNORECASE),
+    re.compile(r"\bestablish\b", re.IGNORECASE),
+    re.compile(r"\bstrengthen\b", re.IGNORECASE),
+    re.compile(r"\bensure\b", re.IGNORECASE),
+    re.compile(r"\bfoster\b", re.IGNORECASE),
+    re.compile(r"\bpromote\b", re.IGNORECASE),
+    re.compile(r"\bencourage\b", re.IGNORECASE),
 ]
 
-# A span is considered citation-heavy if it has ≥ this many citation hits.
-_CITATION_HIT_THRESHOLD = 2
+_CITATION_PATTERNS = [
+    re.compile(r"\(\s*[A-Z][a-z]+(?:\s+(?:et\s+al\.?|&|and)\s+[A-Z][a-z]+)*\s*,?\s*\d{4}\s*\)"),
+    re.compile(r"\[\d+(?:[,;\s]+\d+)*\]"),
+    re.compile(r"\b(?:ibid|op\.?\s*cit|loc\.?\s*cit)\b", re.IGNORECASE),
+]
 
-# Strength mapping from modal verbs in text
-_STRENGTH_MAP: Dict[str, RecommendationStrength] = {
+_STRENGTH_MAP = {
     "must": RecommendationStrength.MUST,
+    "require": RecommendationStrength.MUST,
     "should": RecommendationStrength.SHOULD,
-    "could": RecommendationStrength.COULD,
-    "may": RecommendationStrength.MAY,
+    "ought": RecommendationStrength.SHOULD,
     "recommend": RecommendationStrength.SHOULD,
-    "recommends": RecommendationStrength.SHOULD,
-    "propose": RecommendationStrength.SHOULD,
-    "proposes": RecommendationStrength.SHOULD,
-    "urge": RecommendationStrength.MUST,
-    "urges": RecommendationStrength.MUST,
+    "could": RecommendationStrength.COULD,
+    "suggest": RecommendationStrength.COULD,
+    "may": RecommendationStrength.MAY,
     "consider": RecommendationStrength.CONSIDER,
+    "might": RecommendationStrength.CONSIDER,
 }
 
-# Actor-type normalization lookup (conservative — only explicit keywords)
-_ACTOR_NORM: Dict[str, ActorType] = {
+_ACTOR_MAP = {
     "government": ActorType.GOVERNMENT,
-    "governments": ActorType.GOVERNMENT,
-    "policymakers": ActorType.GOVERNMENT,
-    "policymaker": ActorType.GOVERNMENT,
-    "policy-makers": ActorType.GOVERNMENT,
-    "policy makers": ActorType.GOVERNMENT,
+    "state": ActorType.GOVERNMENT,
+    "national": ActorType.GOVERNMENT,
     "ministry": ActorType.GOVERNMENT,
-    "ministries": ActorType.GOVERNMENT,
-    "parliament": ActorType.GOVERNMENT,
-    "legislature": ActorType.GOVERNMENT,
     "eu": ActorType.EU_INSTITUTIONS,
-    "european commission": ActorType.EU_INSTITUTIONS,
-    "european union": ActorType.EU_INSTITUTIONS,
-    "european parliament": ActorType.EU_INSTITUTIONS,
+    "european": ActorType.EU_INSTITUTIONS,
+    "commission": ActorType.EU_INSTITUTIONS,
     "un": ActorType.INTERNATIONAL_ORGANIZATIONS,
     "united nations": ActorType.INTERNATIONAL_ORGANIZATIONS,
+    "fao": ActorType.INTERNATIONAL_ORGANIZATIONS,
     "world bank": ActorType.INTERNATIONAL_ORGANIZATIONS,
-    "imf": ActorType.INTERNATIONAL_ORGANIZATIONS,
-    "private sector": ActorType.PRIVATE_SECTOR,
+    "private": ActorType.PRIVATE_SECTOR,
+    "company": ActorType.PRIVATE_SECTOR,
     "industry": ActorType.PRIVATE_SECTOR,
-    "businesses": ActorType.PRIVATE_SECTOR,
-    "companies": ActorType.PRIVATE_SECTOR,
-    "civil society": ActorType.CIVIL_SOCIETY,
-    "ngos": ActorType.CIVIL_SOCIETY,
     "ngo": ActorType.CIVIL_SOCIETY,
-    "researchers": ActorType.RESEARCH_INSTITUTIONS,
-    "academia": ActorType.RESEARCH_INSTITUTIONS,
-    "universities": ActorType.RESEARCH_INSTITUTIONS,
+    "civil society": ActorType.CIVIL_SOCIETY,
+    "community": ActorType.CIVIL_SOCIETY,
+    "research": ActorType.RESEARCH_INSTITUTIONS,
+    "university": ActorType.RESEARCH_INSTITUTIONS,
+    "academic": ActorType.RESEARCH_INSTITUTIONS,
 }
 
-# Instrument-type normalization (conservative)
-_INSTRUMENT_NORM: Dict[str, InstrumentType] = {
+_INSTRUMENT_MAP = {
     "regulation": InstrumentType.REGULATION,
-    "regulatory": InstrumentType.REGULATION,
-    "legislation": InstrumentType.REGULATION,
     "law": InstrumentType.REGULATION,
-    "ban": InstrumentType.REGULATION,
-    "mandate": InstrumentType.REGULATION,
-    "standard": InstrumentType.REGULATION,
+    "legislation": InstrumentType.REGULATION,
     "subsidy": InstrumentType.SUBSIDY,
-    "subsidies": InstrumentType.SUBSIDY,
-    "grant": InstrumentType.SUBSIDY,
+    "payment": InstrumentType.SUBSIDY,
     "incentive": InstrumentType.SUBSIDY,
     "tax": InstrumentType.TAX,
-    "taxation": InstrumentType.TAX,
     "levy": InstrumentType.TAX,
-    "tariff": InstrumentType.TAX,
     "information": InstrumentType.INFORMATION,
-    "awareness": InstrumentType.INFORMATION,
-    "campaign": InstrumentType.INFORMATION,
-    "education": InstrumentType.INFORMATION,
-    "voluntary": InstrumentType.VOLUNTARY,
-    "pledge": InstrumentType.VOLUNTARY,
     "monitoring": InstrumentType.MONITORING,
-    "surveillance": InstrumentType.MONITORING,
+    "research": InstrumentType.RESEARCH,
+    "certification": InstrumentType.VOLUNTARY,
+    "voluntary": InstrumentType.VOLUNTARY,
+    "planning": InstrumentType.PLANNING,
     "procurement": InstrumentType.PROCUREMENT,
     "infrastructure": InstrumentType.INFRASTRUCTURE,
+    "institutional": InstrumentType.INSTITUTIONAL,
 }
+
+# ── LLM Prompt ────────────────────────────────────────────────────────────
+
+_CLASSIFICATION_PROMPT = """You are an expert policy analyst. Classify each candidate text span.
+
+Types:
+- recommendation: A clear suggestion or directive for future action by a specific or implicit actor.
+- policy_option: A policy alternative presented for consideration (not yet endorsed).
+- implementation_step: A concrete action step for implementing a broader recommendation.
+- expected_outcome: A predicted result of a recommendation or policy.
+- trade_off: An acknowledged tension or cost of a policy choice.
+- actor_responsibility: Assignment of responsibility to a specific actor.
+- non_recommendation: The text does not contain any of the above.
+
+Rules:
+- Only classify as 'recommendation' if the text contains a clear call to action.
+- Do NOT classify citations, references, bibliographic entries, or footnotes as recommendations.
+- Do NOT classify general observations or descriptions of existing policy as recommendations.
+- If the actor is not explicitly named, set actor_text_raw to null.
+- If the action is vague or implied, set action_text_raw to null.
+- Confidence: 0.0-1.0. Use 0.8+ only for unambiguous prescriptive statements.
+- For non_recommendation, set rejection_reason explaining why.
+
+Return one classification per candidate, in order."""
 
 
 class RecommendationExtractor:
-    """Section-aware policy extraction with candidate-span classification.
-
-    Pipeline:
-      1. Identify target pages from section map (or fall back to heuristic)
-      2. Split text into sentence-level candidate spans
-      3. Reject spans from excluded sections or with heavy citations
-      4. Tag spans with prescriptive-language cues
-      5. Send surviving candidates to LLM for narrow classification
-      6. Apply post-classification validation
-      7. Return list of PolicyExtraction objects
-    """
+    """Extract policy recommendations from document text."""
 
     def __init__(
         self,
         llm_client: LLMClient,
-        enums_config: Dict[str, List[str]],
-        min_confidence: float = 0.6,
-        max_recommendations: int = 10,
-        # Legacy kwargs — accepted but ignored after rewrite
-        recommendation_signals: Optional[List[str]] = None,
-        target_sections: Optional[List[str]] = None,
+        config: Dict[str, Any],
     ):
-        self.llm_client = llm_client
-        self.enums_config = enums_config
-        self.min_confidence = min_confidence
-        self.max_recommendations = max_recommendations
-        logger.info("Initialized section-aware recommendation extractor")
+        self.llm = llm_client
+        self.min_confidence = config.get("min_confidence", 0.6)
+        self.batch_size = config.get("batch_size", 10)
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    # ── Public API ────────────────────────────────────────────────────
 
     def extract_recommendations(
         self,
         pages: List[PageText],
-        section_map: Optional[DocumentSectionMap] = None,
+        doc_id: str,
     ) -> List[PolicyExtraction]:
-        """Extract policy recommendations / options from document pages.
+        """Extract recommendations from document pages."""
+        # Stage 1: Detect and exclude reference pages
+        refs_start = detect_references_start_page(pages)
+        if refs_start is not None:
+            eligible_pages = [p for p in pages if p.page_num < refs_start]
+            logger.info(
+                f"[{doc_id}] References start at page {refs_start}, "
+                f"using {len(eligible_pages)}/{len(pages)} pages"
+            )
+        else:
+            eligible_pages = pages
 
-        Args:
-            pages: Document pages with text.
-            section_map: Section map from section segmenter (strongly recommended).
-
-        Returns:
-            List of validated PolicyExtraction objects.
-        """
-        logger.info(f"Extracting recommendations from {len(pages)} pages")
-
-        # Step 1 — Identify target pages
-        target_pages, page_section_map = self._identify_target_pages(
-            pages, section_map
-        )
-        if not target_pages:
-            logger.info("No target pages identified for recommendation extraction")
+        if not eligible_pages:
             return []
 
-        logger.debug(
-            f"Target pages: {[p.page_num for p in target_pages]}"
-        )
-
-        # Step 2+3 — Generate & filter candidate spans
-        candidates = self._generate_candidates(target_pages, page_section_map)
+        # Stage 2: Generate candidates (prescriptive filter + citation reject)
+        candidates = self._generate_candidates(eligible_pages)
         if not candidates:
-            logger.info("No candidate spans survived filtering")
+            logger.info(f"[{doc_id}] No prescriptive candidates found")
             return []
 
-        logger.debug(f"Generated {len(candidates)} candidate spans")
+        logger.info(f"[{doc_id}] {len(candidates)} prescriptive candidates")
 
-        # Step 4 — Classify candidates via LLM
-        try:
-            extractions = self._classify_candidates(candidates, pages)
-        except Exception as e:
-            logger.error(f"Candidate classification failed: {e}")
-            return []
+        # Stage 3: Batch LLM classification
+        classifications = self._classify_candidates(candidates)
 
-        # Step 5 — Cap at max_recommendations
-        extractions = extractions[: self.max_recommendations]
-
-        logger.info(f"Extracted {len(extractions)} policy extractions")
+        # Stage 4: Build validated extractions
+        full_text = "\n".join(p.text for p in eligible_pages)
+        extractions = self._build_extractions(
+            candidates, classifications, full_text, doc_id
+        )
         return extractions
 
-    # ------------------------------------------------------------------
-    # Step 1: Identify target pages
-    # ------------------------------------------------------------------
-
-    def _identify_target_pages(
-        self,
-        pages: List[PageText],
-        section_map: Optional[DocumentSectionMap],
-    ) -> Tuple[List[PageText], Dict[int, Optional[SectionLabel]]]:
-        """Return pages from target sections and a page→section mapping.
-
-        Falls back to simple heuristic if no section map is available.
-        """
-        page_section: Dict[int, Optional[SectionLabel]] = {}
-
-        if section_map and section_map.sections:
-            target_page_nums: Set[int] = set()
-
-            for section in section_map.sections:
-                label = section.normalized_label
-                if label in _EXCLUDED_SECTIONS:
-                    # Mark excluded pages so we never emit candidates from them
-                    for pn in range(section.start_page, section.end_page + 1):
-                        page_section[pn] = label
-                    continue
-                if label in _TARGET_SECTIONS or label is None:
-                    # Include unlabeled sections (could be body text with recs)
-                    for pn in range(section.start_page, section.end_page + 1):
-                        target_page_nums.add(pn)
-                        if pn not in page_section:
-                            page_section[pn] = label
-
-            target_pages = [p for p in pages if p.page_num in target_page_nums]
-        else:
-            # Fallback: include all pages, mark none as excluded
-            logger.warning(
-                "No section map provided; falling back to all pages"
-            )
-            target_pages = list(pages)
-            for p in pages:
-                page_section[p.page_num] = None
-
-        return target_pages, page_section
-
-    # ------------------------------------------------------------------
-    # Step 2+3: Generate and filter candidate spans
-    # ------------------------------------------------------------------
+    # ── Stage 2: Candidate generation ─────────────────────────────────
 
     def _generate_candidates(
         self,
-        target_pages: List[PageText],
-        page_section: Dict[int, Optional[SectionLabel]],
-    ) -> List[CandidateSpan]:
-        """Split target pages into sentence-level spans and filter."""
-        candidates: List[CandidateSpan] = []
-
-        for page in target_pages:
-            section_label = page_section.get(page.page_num)
-
-            # Skip excluded sections (should already be removed, but defensive)
-            if section_label in _EXCLUDED_SECTIONS:
-                continue
-
-            sentences = self._split_sentences(page.text)
+        pages: List[PageText],
+    ) -> List[Dict[str, Any]]:
+        """Split into sentences, keep prescriptive, reject citation-heavy."""
+        candidates: List[Dict[str, Any]] = []
+        for page in pages:
+            sentences = _split_sentences(page.text)
             for sent in sentences:
-                sent_stripped = sent.strip()
-                if len(sent_stripped) < 20:
-                    continue  # Too short to be a recommendation
-
-                # Reject citation-heavy spans
-                if self._is_citation_heavy(sent_stripped):
+                if len(sent.split()) < 5:
                     continue
+                if not _has_prescriptive_cue(sent):
+                    continue
+                if _is_citation_heavy(sent):
+                    continue
+                candidates.append({
+                    "text": sent.strip(),
+                    "page": page.page_num,
+                })
+        return candidates
 
-                # Tag prescriptive language
-                has_prescriptive, cues = self._detect_prescriptive(sent_stripped)
-
-                candidates.append(
-                    CandidateSpan(
-                        text=sent_stripped,
-                        page=page.page_num,
-                        source_section=section_label,
-                        has_prescriptive_language=has_prescriptive,
-                        prescriptive_cues=cues,
-                    )
-                )
-
-        # Only keep spans with prescriptive language
-        prescriptive_candidates = [
-            c for c in candidates if c.has_prescriptive_language
-        ]
-
-        if not prescriptive_candidates:
-            logger.debug(
-                "No candidates with prescriptive language found; "
-                f"total raw candidates: {len(candidates)}"
-            )
-
-        return prescriptive_candidates
-
-    # ------------------------------------------------------------------
-    # Step 4: Classify candidates via LLM
-    # ------------------------------------------------------------------
+    # ── Stage 3: LLM classification ──────────────────────────────────
 
     def _classify_candidates(
         self,
-        candidates: List[CandidateSpan],
-        all_pages: List[PageText],
-    ) -> List[PolicyExtraction]:
-        """Send candidates to LLM for classification and build results."""
-
-        # Batch candidates (to reduce API calls)
-        batch_size = 10
-        all_extractions: List[PolicyExtraction] = []
-
-        for start in range(0, len(candidates), batch_size):
-            batch = candidates[start: start + batch_size]
-            classifications = self._llm_classify_batch(batch)
-
-            for candidate, classification in zip(batch, classifications):
-                extraction = self._build_extraction(
-                    candidate, classification, all_pages
-                )
-                if extraction is not None:
-                    all_extractions.append(extraction)
-
-        # Sort: recommendations first, then options, by confidence desc
-        type_priority = {
-            ExtractionType.RECOMMENDATION: 0,
-            ExtractionType.POLICY_OPTION: 1,
-            ExtractionType.ACTOR_RESPONSIBILITY: 2,
-            ExtractionType.IMPLEMENTATION_STEP: 3,
-            ExtractionType.EXPECTED_OUTCOME: 4,
-            ExtractionType.TRADE_OFF: 5,
-        }
-        all_extractions.sort(
-            key=lambda e: (
-                type_priority.get(e.extraction_type, 99),
-                -e.confidence,
-            )
-        )
-
-        return all_extractions
-
-    def _llm_classify_batch(
-        self, candidates: List[CandidateSpan]
+        candidates: List[Dict[str, Any]],
     ) -> List[CandidateClassification]:
-        """Call LLM to classify a batch of candidate spans."""
+        """Send candidate batches to LLM for classification."""
+        all_classifications: List[CandidateClassification] = []
 
-        # Build numbered candidate list for the prompt
-        candidate_lines = []
-        for i, c in enumerate(candidates, 1):
-            section_info = f" [section: {c.source_section.value}]" if c.source_section else ""
-            candidate_lines.append(
-                f"CANDIDATE {i} (page {c.page}{section_info}):\n{c.text}"
+        for i in range(0, len(candidates), self.batch_size):
+            batch = candidates[i : i + self.batch_size]
+            batch_text = "\n".join(
+                f"[{j+1}] (page {c['page']}): {c['text']}"
+                for j, c in enumerate(batch)
             )
-        candidates_text = "\n\n".join(candidate_lines)
 
-        system_message = self._build_classification_system_prompt(len(candidates))
-        user_message = (
-            f"Classify each candidate span below. Return exactly "
-            f"{len(candidates)} classifications in order.\n\n"
-            f"{candidates_text}"
-        )
-
-        messages = [
-            {"role": "system", "content": system_message},
-            {"role": "user", "content": user_message},
-        ]
-
-        try:
-            result = self.llm_client.structured_completion(
-                messages, CandidateClassificationBatch
-            )
-            classifications = result.classifications
-
-            # Pad or truncate to match input length
-            if len(classifications) < len(candidates):
-                logger.warning(
-                    f"LLM returned {len(classifications)} classifications "
-                    f"for {len(candidates)} candidates; padding with non_recommendation"
-                )
-                while len(classifications) < len(candidates):
-                    classifications.append(
-                        CandidateClassification(
-                            extraction_type=ExtractionType.NON_RECOMMENDATION,
-                            confidence=0.0,
-                            rejection_reason="LLM did not classify this span",
-                        )
-                    )
-            return classifications[: len(candidates)]
-
-        except Exception as e:
-            logger.error(f"LLM classification failed: {e}")
-            # Return non_recommendation for all on failure
-            return [
-                CandidateClassification(
-                    extraction_type=ExtractionType.NON_RECOMMENDATION,
-                    confidence=0.0,
-                    rejection_reason=f"Classification error: {e}",
-                )
-                for _ in candidates
+            messages = [
+                {"role": "system", "content": _CLASSIFICATION_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Classify these {len(batch)} candidate spans:\n\n{batch_text}"
+                    ),
+                },
             ]
 
-    def _build_classification_system_prompt(self, num_candidates: int) -> str:
-        """Build the system prompt for candidate classification."""
-        return f"""You are a strict policy-document analyst. You will receive {num_candidates} candidate text spans extracted from a policy brief. For each span, classify it into EXACTLY ONE of these categories:
-
-- recommendation: A prescriptive statement where the document's authors recommend a specific action or policy measure. Must contain an action/intervention and prescriptive language (should, must, recommend, propose, etc.).
-- policy_option: A named policy alternative or scenario being presented for consideration, not necessarily endorsed.
-- implementation_step: A concrete step describing how to carry out a recommendation.
-- expected_outcome: A statement about anticipated results or impacts.
-- trade_off: A statement about downsides, risks, costs, or trade-offs.
-- actor_responsibility: A statement assigning responsibility to a specific actor without a new action.
-- non_recommendation: Everything else — background, description, literature summary, citation, finding, or generic normative language.
-
-CRITICAL RULES:
-1. References, bibliographic entries, and citations are ALWAYS non_recommendation, even if they contain "should" or "recommend". A citation describes what someone ELSE said, not what THIS document recommends.
-2. Descriptive findings ("The study found that X should be considered") are non_recommendation unless the document is ENDORSING that finding as its own recommendation.
-3. Generic normative statements ("Education is important") are non_recommendation.
-4. If a span discusses what a DIFFERENT study, report, or author recommended, it is non_recommendation.
-5. Only classify as recommendation if the AUTHORS OF THIS DOCUMENT are making a prescriptive statement.
-6. If you are uncertain, classify as non_recommendation with confidence < 0.5.
-7. Actor must be extracted ONLY from explicit text. Do NOT infer actors that are not stated.
-8. Return null for any field you cannot confidently determine from the text.
-9. Return exactly {num_candidates} classifications in the same order as the input candidates.
-
-For each classification, provide:
-- extraction_type: one of the categories above
-- confidence: 0.0-1.0
-- actor_text_raw: exact actor text from span, or null
-- action_text_raw: exact action phrase, or null
-- target_text_raw: exact target, or null
-- instrument_type: policy instrument if EXPLICITLY stated (regulation, subsidy, tax, etc.), or null
-- strength: modal verb strength (must, should, could, may, consider), or null
-- expected_outcomes: list of outcome phrases, or empty
-- implementation_steps: list of step phrases, or empty
-- trade_offs: list of trade-off/risk phrases, or empty
-- rejection_reason: why classified as non_recommendation, or null"""
-
-    # ------------------------------------------------------------------
-    # Post-classification: build and validate PolicyExtraction
-    # ------------------------------------------------------------------
-
-    def _build_extraction(
-        self,
-        candidate: CandidateSpan,
-        classification: CandidateClassification,
-        all_pages: List[PageText],
-    ) -> Optional[PolicyExtraction]:
-        """Build a PolicyExtraction from a classified candidate.
-
-        Returns None for non_recommendation or failed validation.
-        """
-        etype = classification.extraction_type
-
-        # Reject non-recommendations
-        if etype == ExtractionType.NON_RECOMMENDATION:
-            return None
-
-        # Reject low-confidence
-        if classification.confidence < self.min_confidence:
-            logger.debug(
-                f"Rejecting low-confidence ({classification.confidence:.2f}) "
-                f"extraction: {candidate.text[:60]}..."
-            )
-            return None
-
-        # For recommendations, enforce functional criteria
-        if etype == ExtractionType.RECOMMENDATION:
-            if not classification.action_text_raw:
-                logger.debug(
-                    "Rejecting recommendation without action: "
-                    f"{candidate.text[:60]}..."
+            try:
+                result: CandidateClassificationBatch = self.llm.structured_completion(
+                    messages, CandidateClassificationBatch
                 )
-                return None
+                # Pad or truncate to match batch size
+                clfs = result.classifications
+                while len(clfs) < len(batch):
+                    clfs.append(CandidateClassification(
+                        extraction_type=ExtractionType.NON_RECOMMENDATION,
+                        confidence=0.0,
+                        rejection_reason="No classification returned",
+                    ))
+                all_classifications.extend(clfs[: len(batch)])
+            except Exception as exc:
+                logger.warning(f"Batch classification failed: {exc}")
+                all_classifications.extend(
+                    CandidateClassification(
+                        extraction_type=ExtractionType.NON_RECOMMENDATION,
+                        confidence=0.0,
+                        rejection_reason=f"LLM error: {exc}",
+                    )
+                    for _ in batch
+                )
 
-        # Build evidence from the candidate span itself
-        evidence = self._make_evidence(candidate, all_pages)
+        return all_classifications
 
-        # Normalize actor type if possible
-        actor_norm = self._normalize_actor(classification.actor_text_raw)
+    # ── Stage 4: Post-validation and extraction building ──────────────
 
-        # Normalize instrument type
-        instrument = self._normalize_instrument(classification.instrument_type)
+    def _build_extractions(
+        self,
+        candidates: List[Dict[str, Any]],
+        classifications: List[CandidateClassification],
+        full_text: str,
+        doc_id: str,
+    ) -> List[PolicyExtraction]:
+        extractions: List[PolicyExtraction] = []
+        rec_counter = 0
 
-        # Normalize strength
-        strength = self._normalize_strength(classification.strength)
+        for cand, clf in zip(candidates, classifications):
+            if clf.extraction_type == ExtractionType.NON_RECOMMENDATION:
+                continue
+            if clf.confidence < self.min_confidence:
+                continue
 
-        return PolicyExtraction(
-            extraction_type=etype,
-            confidence=classification.confidence,
-            source_text_raw=candidate.text,
-            source_section=candidate.source_section,
-            page=candidate.page,
-            actor_text_raw=classification.actor_text_raw,
-            actor_type_normalized=actor_norm,
-            action_text_raw=classification.action_text_raw,
-            target_text_raw=classification.target_text_raw,
-            instrument_type=instrument,
-            strength=strength,
-            expected_outcomes=classification.expected_outcomes,
-            implementation_steps=classification.implementation_steps,
-            trade_offs=classification.trade_offs,
-            evidence=evidence,
-        )
+            # Build evidence (quote = candidate text itself)
+            evidence = self._build_evidence(cand, full_text)
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
+            # Skip recommendations that require evidence but have none
+            if clf.extraction_type in (
+                ExtractionType.RECOMMENDATION,
+                ExtractionType.POLICY_OPTION,
+            ) and not evidence:
+                continue
 
-    @staticmethod
-    def _split_sentences(text: str) -> List[str]:
-        """Split text into sentence-level spans.
+            rec_counter += 1
+            rec_id = f"{doc_id}_rec_{rec_counter:03d}"
 
-        Uses a simple rule: split on sentence-ending punctuation followed
-        by whitespace or end-of-string.  Preserves bullet/list items as
-        separate spans.
-        """
-        if not text:
-            return []
+            extractions.append(PolicyExtraction(
+                rec_id=rec_id,
+                extraction_type=clf.extraction_type,
+                confidence=clf.confidence,
+                source_text_raw=cand["text"],
+                source_section=None,
+                page=cand["page"],
+                actor_text_raw=clf.actor_text_raw,
+                actor_type_normalized=_normalize_actor(clf.actor_text_raw),
+                action_text_raw=clf.action_text_raw,
+                target_text_raw=clf.target_text_raw,
+                instrument_type=_normalize_instrument(clf.instrument_type),
+                strength=_normalize_strength(clf.strength),
+                expected_outcomes=clf.expected_outcomes,
+                implementation_steps=clf.implementation_steps,
+                trade_offs=clf.trade_offs,
+                evidence=evidence,
+            ))
 
-        # First split on newlines that look like list items or paragraph breaks
-        lines = re.split(r"\n(?=\s*[\-•●◦▪]|\s*\d+[\.\)]\s|\n)", text)
-
-        sentences: List[str] = []
-        for line in lines:
-            # Split on sentence-ending punctuation
-            parts = re.split(r"(?<=[.!?])\s+(?=[A-Z])", line)
-            sentences.extend(parts)
-
-        return [s for s in sentences if s.strip()]
-
-    @staticmethod
-    def _is_citation_heavy(text: str) -> bool:
-        """Return True if the span looks like a citation or reference entry."""
-        hits = 0
-        for pattern in _CITATION_PATTERNS:
-            matches = pattern.findall(text)
-            hits += len(matches)
-            if hits >= _CITATION_HIT_THRESHOLD:
-                return True
-
-        # Also reject if it starts with typical reference-list formatting
-        if re.match(r"^\d+\.\s+[A-Z][a-z]+,?\s+[A-Z]", text):
-            return True
-
-        return False
-
-    @staticmethod
-    def _detect_prescriptive(text: str) -> Tuple[bool, List[str]]:
-        """Detect prescriptive language in a span."""
-        matched: List[str] = []
-        for i, pattern in enumerate(_PRESCRIPTIVE_RE):
-            if pattern.search(text):
-                matched.append(_PRESCRIPTIVE_CUES[i])
-        return bool(matched), matched
+        return extractions
 
     @staticmethod
-    def _make_evidence(
-        candidate: CandidateSpan, all_pages: List[PageText]
-    ) -> List[Evidence]:
-        """Create an Evidence object from a candidate span.
-
-        Validates that the quote exists verbatim in the source page.
-        Returns empty list if validation fails.
-        """
-        quote = candidate.text.strip()
-
-        # Enforce Evidence model constraints
+    def _build_evidence(cand: Dict[str, Any], full_text: str) -> List[Evidence]:
+        """Create evidence from the candidate text if it exists in source."""
+        quote = cand["text"][:500].strip()
         if len(quote) < 10:
             return []
-        if len(quote) > 500:
-            quote = quote[:497] + "..."
+        # Verify quote is in source text (normalised whitespace)
+        norm_source = re.sub(r"\s+", " ", full_text)
+        norm_quote = re.sub(r"\s+", " ", quote)
+        if norm_quote not in norm_source:
+            # Try shorter prefix
+            short = norm_quote[:100]
+            if short not in norm_source:
+                return []
+        return [Evidence(page=cand["page"], quote=quote)]
 
-        # Verify quote exists in source page
-        target_page = None
-        for page in all_pages:
-            if page.page_num == candidate.page:
-                target_page = page
-                break
 
-        if target_page is None:
-            return []
+# ── Module-level helpers ──────────────────────────────────────────────────
 
-        # Try exact match
-        if quote in target_page.text:
-            return [Evidence(page=candidate.page, quote=quote)]
 
-        # Try normalized whitespace match
-        quote_norm = re.sub(r"\s+", " ", quote)
-        page_norm = re.sub(r"\s+", " ", target_page.text)
-        if quote_norm in page_norm:
-            return [Evidence(page=candidate.page, quote=quote)]
+def detect_references_start_page(pages: List[PageText]) -> Optional[int]:
+    """Find the page where references/bibliography section begins.
 
-        # Candidate text should always exist (we split it from the page), but
-        # if truncation happened, accept anyway since we have source_text_raw
-        logger.warning(
-            f"Evidence quote not found verbatim on page {candidate.page}: "
-            f"{quote[:50]}..."
-        )
-        return [Evidence(page=candidate.page, quote=quote)]
-
-    @staticmethod
-    def _normalize_actor(actor_raw: Optional[str]) -> Optional[ActorType]:
-        """Normalize raw actor text to ActorType enum if safely mappable."""
-        if not actor_raw:
-            return None
-        key = actor_raw.strip().lower()
-        # Try exact match first
-        if key in _ACTOR_NORM:
-            return _ACTOR_NORM[key]
-        # Try substring match (e.g., "national government" → GOVERNMENT)
-        for token, atype in _ACTOR_NORM.items():
-            if token in key:
-                return atype
+    Searches only the last 40% of the document (from the back) to avoid
+    false positives from citation lines or author-block "Reference" headings
+    that appear near the front of the document.
+    """
+    if not pages:
         return None
+    # Only search the back portion of the document
+    cutoff = max(1, int(len(pages) * 0.6))
+    back_pages = [p for p in pages if p.page_num > cutoff]
+    if not back_pages:
+        back_pages = pages[-2:]  # at least check the last 2 pages
 
-    @staticmethod
-    def _normalize_instrument(raw: Optional[str]) -> Optional[InstrumentType]:
-        """Normalize raw instrument type string."""
-        if not raw:
-            return None
-        key = raw.strip().lower()
-        if key in _INSTRUMENT_NORM:
-            return _INSTRUMENT_NORM[key]
-        for token, itype in _INSTRUMENT_NORM.items():
-            if token in key:
-                return itype
+    for page in reversed(back_pages):
+        for pat in _REFS_PATTERNS:
+            if pat.search(page.text):
+                return page.page_num
+    return None
+
+
+def _split_sentences(text: str) -> List[str]:
+    """Cheap regex sentence splitter."""
+    raw = re.split(r"(?<=[.!?])\s+", text)
+    return [s.strip() for s in raw if len(s.strip()) > 10]
+
+
+def _has_prescriptive_cue(sentence: str) -> bool:
+    return any(p.search(sentence) for p in _PRESCRIPTIVE_CUES)
+
+
+def _is_citation_heavy(sentence: str, threshold: float = 0.4) -> bool:
+    """Reject sentences where >40% of content is citation markup."""
+    total_len = len(sentence)
+    if total_len == 0:
+        return False
+    citation_chars = sum(
+        len(m.group()) for p in _CITATION_PATTERNS for m in p.finditer(sentence)
+    )
+    return (citation_chars / total_len) > threshold
+
+
+def _normalize_strength(raw: Optional[str]) -> Optional[RecommendationStrength]:
+    if not raw:
         return None
+    low = raw.lower().strip()
+    # Try direct enum match
+    try:
+        return RecommendationStrength(low)
+    except ValueError:
+        pass
+    # Try keyword map
+    for key, val in _STRENGTH_MAP.items():
+        if key in low:
+            return val
+    return RecommendationStrength.UNSPECIFIED
 
-    @staticmethod
-    def _normalize_strength(raw: Optional[str]) -> Optional[RecommendationStrength]:
-        """Normalize modal verb to RecommendationStrength."""
-        if not raw:
-            return None
-        key = raw.strip().lower()
-        return _STRENGTH_MAP.get(key)
+
+def _normalize_actor(raw: Optional[str]) -> Optional[ActorType]:
+    if not raw:
+        return None
+    low = raw.lower()
+    for key, val in _ACTOR_MAP.items():
+        if key in low:
+            return val
+    return ActorType.UNSPECIFIED
+
+
+def _normalize_instrument(raw: Optional[str]) -> Optional[InstrumentType]:
+    if not raw:
+        return None
+    # Try direct enum match
+    try:
+        return InstrumentType(raw.lower().strip())
+    except ValueError:
+        pass
+    low = raw.lower()
+    for key, val in _INSTRUMENT_MAP.items():
+        if key in low:
+            return val
+    return InstrumentType.OTHER

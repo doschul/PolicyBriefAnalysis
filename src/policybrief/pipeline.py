@@ -1,737 +1,488 @@
 """
-Main pipeline orchestrator for policy brief analysis.
+Policy Brief Analysis Pipeline — LLM-first orchestrator.
 
-Coordinates PDF extraction, metrics calculation, frame detection, and recommendation extraction.
+Front-matter and structural-core extraction are handled by inline LLM calls.
+Frame detection and recommendation extraction delegate to their modules.
 """
 
-import concurrent.futures
-import hashlib
 import json
 import logging
+import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
 from .frame_detector import FrameDetector
-from .frontmatter_extractor import FrontMatterExtractor
 from .llm_client import LLMClient
 from .metrics_calculator import MetricsCalculator
 from .models import (
-    PerDocumentExtraction,
-    ProcessingStatus,
+    DocumentFrontMatter,
+    DocumentMetrics,
     FrameAssessment,
-    PolicyRecommendation,
+    PageText,
+    PDFMetadata,
+    PerDocumentExtraction,
     PolicyExtraction,
+    ProcessingStatus,
+    StructuralCoreResult,
 )
 from .pdf_extractor import PDFExtractor
 from .recommendation_extractor import RecommendationExtractor
-from .section_segmenter import SectionSegmenter
-from .structural_core_extractor import StructuralCoreExtractor
 from .utils import (
+    clean_text_for_csv,
     create_document_id,
     ensure_output_directories,
     get_env_var,
     load_yaml_config,
     save_dataframe,
     save_json,
-    validate_file_paths,
-    clean_text_for_csv,
-    ProgressTracker
 )
-
 
 logger = logging.getLogger(__name__)
 
 
+# ── LLM prompts for pipeline-level extraction ────────────────────────────
+
+_FRONT_MATTER_PROMPT = """Extract front-matter metadata from this document text.
+
+Return JSON with exactly these fields:
+- title: the document title (null if not found)
+- authors: list of author names (empty list if none)
+- affiliations: list of institutional affiliations (empty list if none)
+- emails: list of email addresses found (empty list if none)
+- urls: list of URLs found (empty list if none)
+- funding_statements: list of funding acknowledgements (empty list if none)
+- linked_studies: list of referenced study names/IDs (empty list if none)
+
+Be conservative: only extract information explicitly stated in the text.
+Do not infer or guess. If unsure, leave as null or empty list."""
+
+_STRUCTURAL_CORE_PROMPT = """Analyze the structural components of this policy document.
+
+Assess whether the document contains:
+1. **Problem identification**: Does the document explicitly identify and frame a policy problem?
+   - "present": clear, explicit problem framing with evidence
+   - "weak": problem is implied but not explicitly stated
+   - "absent": no problem identification
+2. **Solutions**: How many distinct policy solutions are proposed?
+   - Count only concrete, actionable solutions (not vague aspirations)
+   - Are solutions explicitly linked to the identified problem?
+3. **Implementation considerations**: Does the document discuss how to implement its proposals?
+   - "present": concrete implementation steps, timelines, or actors
+   - "weak": brief mention without detail
+   - "absent": no implementation discussion
+4. **Narrative hook**: Does the document use a compelling opening device?
+   - Examples: case study, statistic, anecdote, provocative question
+
+Return JSON with:
+- problem_status: "present"/"absent"/"weak"
+- problem_summary: brief description of the problem (null if absent)
+- solutions_count: integer count of distinct solutions
+- solutions_explicit: boolean, are solutions explicitly proposed?
+- implementation_status: "present"/"absent"/"weak"
+- implementation_count: number of implementation considerations
+- narrative_hook_present: boolean
+- narrative_hook_type: type of hook used (null if none)
+
+Be conservative. Only mark as "present" when evidence is clear."""
+
+
 class PolicyBriefPipeline:
-    """Main pipeline for policy brief analysis."""
-    
+    """Main pipeline: PDF → text → metrics → LLM analysis → output tables."""
+
     def __init__(
         self,
         config_dir: Path,
         output_dir: Path,
         max_workers: int = 4,
-        force_reprocess: bool = False
+        force_reprocess: bool = False,
     ):
-        """
-        Initialize the policy brief analysis pipeline.
-        
-        Args:
-            config_dir: Directory containing configuration files
-            output_dir: Directory for output files
-            max_workers: Maximum concurrent processing threads  
-            force_reprocess: Skip hash-based change detection
-        """
-        self.config_dir = config_dir
-        self.output_dir = output_dir
+        self.config_dir = Path(config_dir)
+        self.output_dir = Path(output_dir)
         self.max_workers = max_workers
         self.force_reprocess = force_reprocess
-        
-        logger.info(f"Initializing pipeline with config from {config_dir}")
-        
-        # Load configuration
-        self.config = self._load_configuration()
-        self.frames = self._load_frames_config()
-        self.enums = self._load_enums_config()
-        
-        # Module switches (all default to enabled)
-        modules_cfg = self.config.get("modules", {})
-        self.enable_front_matter = modules_cfg.get("front_matter", True)
-        self.enable_section_segmentation = modules_cfg.get("section_segmentation", True)
-        self.enable_structural_core = modules_cfg.get("structural_core", True)
-        self.enable_frames = modules_cfg.get("frames", True)
-        self.enable_recommendations = modules_cfg.get("recommendations", True)
-        
-        # Initialize components
-        self.llm_client = self._initialize_llm_client()
-        self.pdf_extractor = self._initialize_pdf_extractor()
-        self.frontmatter_extractor = FrontMatterExtractor()
-        self.section_segmenter = SectionSegmenter()
-        self.structural_core_extractor = StructuralCoreExtractor()
-        self.metrics_calculator = MetricsCalculator()
-        self.frame_detector = self._initialize_frame_detector()
-        self.recommendation_extractor = self._initialize_recommendation_extractor()
-        
-        # Ensure output directories exist
-        ensure_output_directories(output_dir)
-        
-        # Track processing cache
-        self.processing_cache = self._load_processing_cache()
-        
-        logger.info("Pipeline initialization complete")
-    
-    def _load_configuration(self) -> Dict[str, Any]:
-        """Load main configuration file."""
-        config_file = self.config_dir / "config.yaml"
-        if not config_file.exists():
-            raise FileNotFoundError(f"Main config file not found: {config_file}")
-        
-        return load_yaml_config(config_file)
-    
-    def _load_frames_config(self) -> List[Dict[str, Any]]:
-        """Load frames configuration."""
-        frames_file = self.config_dir / "frames.yaml"
-        if not frames_file.exists():
-            raise FileNotFoundError(f"Frames config file not found: {frames_file}")
-        
-        frames_config = load_yaml_config(frames_file)
-        frames = frames_config.get("frames", [])
-        
-        if not frames:
-            raise ValueError("No frames defined in frames.yaml")
-        
-        logger.info(f"Loaded {len(frames)} theoretical frames")
-        return frames
-    
-    def _load_enums_config(self) -> Dict[str, List[str]]:
-        """Load enums configuration."""
-        enums_file = self.config_dir / "enums.yaml"
-        if not enums_file.exists():
-            raise FileNotFoundError(f"Enums config file not found: {enums_file}")
-        
-        return load_yaml_config(enums_file)
-    
-    def _initialize_llm_client(self) -> LLMClient:
-        """Initialize OpenAI LLM client."""
-        openai_config = self.config.get("openai", {})
-        
-        # Get API key from environment
-        api_key = get_env_var("OPENAI_API_KEY", required=True)
-        
-        return LLMClient(
-            api_key=api_key,
-            model=openai_config.get("model", "gpt-4o-2024-08-06"),
-            temperature=openai_config.get("temperature", 0.1),
-            max_tokens=openai_config.get("max_tokens", 4000),
-            timeout=openai_config.get("timeout", 60),
-            max_retries=openai_config.get("max_retries", 3),
-            retry_delay=openai_config.get("retry_delay", 1.0)
-        )
-    
-    def _initialize_pdf_extractor(self) -> PDFExtractor:
-        """Initialize PDF extractor."""
-        pdf_config = self.config.get("pdf", {})
-        
-        return PDFExtractor(
-            extract_method=pdf_config.get("extract_method", "pymupdf"),
-            preserve_layout=pdf_config.get("preserve_layout", True),
-            max_pages=pdf_config.get("max_pages", 0),
-            max_file_size_mb=pdf_config.get("max_file_size_mb", 50)
-        )
-    
-    def _initialize_frame_detector(self) -> FrameDetector:
-        """Initialize frame detector."""
-        frames_config = self.config.get("frames", {})
-        
-        return FrameDetector(
-            llm_client=self.llm_client,
-            frames_config=self.frames,
-            min_confidence=frames_config.get("min_confidence", 0.7),
-            max_spans_per_frame=frames_config.get("max_spans_per_frame", 5),
-            context_window=frames_config.get("context_window", 500),
-            min_evidence_quotes=frames_config.get("min_evidence_quotes", 1),
-            max_evidence_quotes=frames_config.get("max_evidence_quotes", 3)
-        )
-    
-    def _initialize_recommendation_extractor(self) -> RecommendationExtractor:
-        """Initialize recommendation extractor."""
-        rec_config = self.config.get("recommendations", {})
-        
-        return RecommendationExtractor(
-            llm_client=self.llm_client,
-            enums_config=self.enums,
-            min_confidence=rec_config.get("min_confidence", 0.6),
-            max_recommendations=rec_config.get("max_recommendations", 10),
-            recommendation_signals=rec_config.get("recommendation_signals"),
-            target_sections=rec_config.get("target_sections")
-        )
-    
-    def _load_processing_cache(self) -> Dict[str, str]:
-        """Load cache of processed files and their hashes."""
-        cache_file = self.output_dir / ".processing_cache.json"
-        
-        if cache_file.exists() and not self.force_reprocess:
-            try:
-                with open(cache_file, 'r') as f:
-                    return json.load(f)
-            except Exception as e:
-                logger.warning(f"Failed to load processing cache: {e}")
-        
-        return {}
-    
-    def _save_processing_cache(self) -> None:
-        """Save processing cache to disk."""
-        cache_file = self.output_dir / ".processing_cache.json" 
-        
-        try:
-            with open(cache_file, 'w') as f:
-                json.dump(self.processing_cache, f, indent=2)
-        except Exception as e:
-            logger.warning(f"Failed to save processing cache: {e}")
-    
-    def process_documents(self, pdf_files: List[Path]) -> Dict[str, Any]:
-        """
-        Process a list of PDF documents.
-        
-        Args:
-            pdf_files: List of PDF file paths
-            
-        Returns:
-            Processing results summary
-        """
-        logger.info(f"Starting processing of {len(pdf_files)} documents")
-        
-        # Validate file paths
-        valid_files = validate_file_paths(pdf_files)
-        if len(valid_files) != len(pdf_files):
-            logger.warning(f"Filtered {len(pdf_files) - len(valid_files)} invalid files")
-        
-        # Check which files need processing
-        files_to_process = []
-        skipped_files = []
-        
-        for file_path in valid_files:
-            if self._needs_processing(file_path):
-                files_to_process.append(file_path)
-            else:
-                skipped_files.append(file_path)
-                logger.debug(f"Skipping unchanged file: {file_path}")
-        
-        logger.info(f"Processing {len(files_to_process)} files, skipping {len(skipped_files)} unchanged")
-        
-        if not files_to_process:
-            logger.info("No files to process")
-            return {
-                "processed": [],
-                "skipped": skipped_files,
-                "errors": []
-            }
-        
-        # Process files with concurrency
-        processed_results = []
-        errors = []
-        
-        progress = ProgressTracker(len(files_to_process), "Processing documents")
-        
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            # Submit all processing tasks
-            future_to_file = {
-                executor.submit(self._process_single_document, file_path): file_path
-                for file_path in files_to_process
-            }
-            
-            # Collect results
-            for future in concurrent.futures.as_completed(future_to_file):
-                file_path = future_to_file[future]
-                
-                try:
-                    result = future.result()
-                    if result:
-                        processed_results.append(result)
-                        # Update cache
-                        file_hash = PDFExtractor.compute_file_hash(file_path)
-                        self.processing_cache[str(file_path)] = file_hash
-                    else:
-                        errors.append(f"Processing failed for {file_path}")
-                        
-                except Exception as e:
-                    logger.error(f"Processing failed for {file_path}: {e}")
-                    errors.append(f"{file_path}: {str(e)}")
-                
-                progress.update()
-        
-        progress.finish()
-        
-        # Save processing cache
-        self._save_processing_cache()
-        
-        # Generate output files
-        if processed_results:
-            self._generate_output_files(processed_results)
-        
-        return {
-            "processed": processed_results,
-            "skipped": skipped_files,
-            "errors": errors
-        }
-    
-    def _needs_processing(self, file_path: Path) -> bool:
-        """Check if file needs processing based on content hash."""
-        if self.force_reprocess:
-            return True
-        
-        try:
-            current_hash = PDFExtractor.compute_file_hash(file_path)
-            cached_hash = self.processing_cache.get(str(file_path))
-            
-            return current_hash != cached_hash
-            
-        except Exception as e:
-            logger.warning(f"Hash computation failed for {file_path}: {e}")
-            return True  # Process if we can't determine
-    
-    def _process_single_document(self, file_path: Path) -> Optional[PerDocumentExtraction]:
-        """
-        Process a single PDF document.
-        
-        Args:
-            file_path: Path to PDF file
-            
-        Returns:
-            Document extraction results or None if failed
-        """
-        start_time = time.time()
-        doc_id = create_document_id(file_path)
-        
-        logger.info(f"Processing document: {doc_id} ({file_path.name})")
-        
-        try:
-            # Extract PDF content
-            pages, metadata, extraction_info = self.pdf_extractor.extract_document(file_path)
-            
-            if not pages or not any(page.text.strip() for page in pages):
-                logger.warning(f"No text content extracted from {file_path}")
-                return None
-            
-            # Build section map and derive headings
-            section_map = None
-            headings = []
-            if self.enable_section_segmentation:
-                try:
-                    layout_lines = extraction_info.get("layout_lines", [])
-                    section_map = self.section_segmenter.segment_document(pages, layout_lines)
-                    headings = [
-                        s.raw_title for s in section_map.sections if s.raw_title
-                    ]
-                except Exception as e:
-                    logger.warning(f"Section segmentation failed for {doc_id}, continuing: {e}")
-            
-            # Extract structural core components
-            structural_core = None
-            if self.enable_structural_core:
-                try:
-                    structural_core = self.structural_core_extractor.extract(pages, section_map)
-                except Exception as e:
-                    logger.warning(f"Structural core extraction failed for {doc_id}, continuing: {e}")
-            
-            # Extract front matter from content
-            front_matter = None
-            if self.enable_front_matter:
-                try:
-                    front_matter = self.frontmatter_extractor.extract_front_matter(pages)
-                except Exception as e:
-                    logger.warning(f"Front matter extraction failed for {doc_id}, continuing: {e}")
-            
-            # Calculate metrics
-            full_text = "\n".join(page.text for page in pages)
-            metrics = self.metrics_calculator.calculate_metrics(pages, headings, full_text)
-            
-            # Detect theoretical frames
-            frame_assessments = []
-            policy_mix_present = False
-            if self.enable_frames:
-                try:
-                    frame_assessments = self.frame_detector.detect_frames(pages)
-                    # Detect policy-mix / instrument-combination annotation
-                    policy_mix_present = self.frame_detector.detect_policy_mix(
-                        pages, frame_assessments
-                    )
-                except Exception as e:
-                    logger.warning(f"Frame detection failed for {doc_id}, continuing: {e}")
-            
-            # Extract recommendations (section-aware, Prompt 4 rewrite)
-            policy_extractions = []
-            if self.enable_recommendations:
-                try:
-                    policy_extractions = self.recommendation_extractor.extract_recommendations(
-                        pages, section_map=section_map
-                    )
-                except Exception as e:
-                    logger.warning(f"Recommendation extraction failed for {doc_id}, continuing: {e}")
-            
-            # Generate extraction IDs
-            for i, ext in enumerate(policy_extractions):
-                ext.rec_id = f"{doc_id}_rec_{i+1:02d}"
-            
-            # Create processing status
-            processing_duration = time.time() - start_time
-            file_hash = PDFExtractor.compute_file_hash(file_path)
-            
-            processing_status = ProcessingStatus(
-                doc_id=doc_id,
-                file_path=str(file_path),
-                file_hash=file_hash,
-                file_size_bytes=file_path.stat().st_size,
-                processing_timestamp=datetime.now(),
-                processing_duration_seconds=processing_duration, 
-                parser_used=self.pdf_extractor.extract_method,
-                likely_scanned=extraction_info.get("likely_scanned", False),
-                text_extraction_quality=extraction_info.get("text_extraction_quality", 1.0),
-                pages_processed=len(pages),
-                frames_processed=len(frame_assessments),
-                recommendations_extracted=len(policy_extractions),
-                warnings=extraction_info.get("warnings", [])
-            )
-            
-            # Create complete extraction result
-            extraction = PerDocumentExtraction(
-                doc_id=doc_id,
-                pages=pages,
-                headings=headings,
-                section_map=section_map,
-                structural_core=structural_core,
-                metadata=metadata,
-                front_matter=front_matter,
-                metrics=metrics,
-                frame_assessments=frame_assessments,
-                policy_mix_present=policy_mix_present,
-                recommendations=[],  # Legacy field, kept for backward compat
-                policy_extractions=policy_extractions,
-                processing_status=processing_status
-            )
-            
-            # Save audit file
-            self._save_audit_file(extraction)
-            
-            logger.info(f"Completed processing {doc_id}: {len(frame_assessments)} frames, {len(policy_extractions)} extractions")
-            
-            return extraction
-            
-        except Exception as e:
-            logger.error(f"Document processing failed for {file_path}: {e}")
-            return None
-    
-    def _save_audit_file(self, extraction: PerDocumentExtraction) -> None:
-        """Save per-document audit file."""
-        audit_file = self.output_dir / "audit" / f"{extraction.doc_id}.json"
-        
-        try:
-            # Convert to dict for JSON serialization
-            audit_data = extraction.model_dump()
-            
-            # Include raw text in audit if configured
-            include_raw_text = self.config.get("output", {}).get("include_raw_text", False)
-            if not include_raw_text:
-                # Remove text content to save space
-                for page in audit_data["pages"]:
-                    page["text"] = f"[Text content omitted - {page['char_count']} chars]"
-            
-            save_json(audit_data, audit_file, 
-                     compress=self.config.get("output", {}).get("compress_json", True))
-            
-        except Exception as e:
-            logger.error(f"Failed to save audit file for {extraction.doc_id}: {e}")
-    
-    def compute_extraction_summary(self, results: List[PerDocumentExtraction]) -> Dict[str, Any]:
-        """Compute a lightweight evaluation summary over extraction results.
-        
-        Returns counts, null rates, and warning flags useful for
-        precision-oriented auditing without needing ground-truth labels.
-        """
-        n = len(results)
-        if n == 0:
-            return {"document_count": 0}
-        
-        front_matter_null = sum(1 for r in results if r.front_matter is None)
-        section_map_null = sum(1 for r in results if r.section_map is None)
-        structural_core_null = sum(1 for r in results if r.structural_core is None)
-        frames_absent = sum(1 for r in results if not r.frame_assessments)
-        recs_absent = sum(1 for r in results if not r.policy_extractions)
-        
-        total_extractions = sum(len(r.policy_extractions) for r in results)
-        total_frames_present = sum(
-            sum(1 for f in r.frame_assessments if f.decision == "present")
-            for r in results
-        )
-        
-        # Warning flags
-        warnings = []
-        if front_matter_null == n:
-            warnings.append("all_front_matter_null")
-        if section_map_null == n:
-            warnings.append("all_section_maps_null")
-        if recs_absent == n and n > 0:
-            warnings.append("zero_recommendations_extracted")
-        if total_extractions > 0:
-            from_references = sum(
-                1 for r in results for e in r.policy_extractions
-                if e.source_section and e.source_section.value == "references"
-            )
-            if from_references / total_extractions > 0.3:
-                warnings.append("high_reference_section_extractions")
-        
-        return {
-            "document_count": n,
-            "front_matter_null": front_matter_null,
-            "section_map_null": section_map_null,
-            "structural_core_null": structural_core_null,
-            "frames_absent": frames_absent,
-            "recommendations_absent": recs_absent,
-            "total_extractions": total_extractions,
-            "total_frames_present": total_frames_present,
-            "avg_extractions_per_doc": round(total_extractions / n, 2),
-            "policy_mix_count": sum(1 for r in results if r.policy_mix_present),
-            "warnings": warnings,
-        }
-    
-    def _generate_output_files(self, results: List[PerDocumentExtraction]) -> None:
-        """Generate tabular output files from processing results."""
-        logger.info("Generating output files...")
-        
-        output_config = self.config.get("output", {})
-        formats = output_config.get("formats", ["csv"])
-        
-        try:
-            # Generate documents table
-            documents_df = self._create_documents_dataframe(results)
-            
-            for fmt in formats:
-                if fmt in ["csv", "parquet"]:
-                    save_dataframe(documents_df, self.output_dir / f"documents.{fmt}", fmt)
-            
-            # Generate frames table
-            frames_df = self._create_frames_dataframe(results)
-            
-            for fmt in formats:
-                if fmt in ["csv", "parquet"]:
-                    save_dataframe(frames_df, self.output_dir / f"frames.{fmt}", fmt)
-            
-            # Generate recommendations table
-            recommendations_df = self._create_recommendations_dataframe(results)
-            
-            for fmt in formats:
-                if fmt in ["csv", "parquet"]:
-                    save_dataframe(recommendations_df, self.output_dir / f"recommendations.{fmt}", fmt)
-            
-            # Generate sections table (one row per section per document)
-            sections_df = self._create_sections_dataframe(results)
-            if not sections_df.empty:
-                for fmt in formats:
-                    if fmt in ["csv", "parquet"]:
-                        save_dataframe(sections_df, self.output_dir / f"sections.{fmt}", fmt)
-            
-            # Generate structural core table
-            structural_core_df = self._create_structural_core_dataframe(results)
-            if not structural_core_df.empty:
-                for fmt in formats:
-                    if fmt in ["csv", "parquet"]:
-                        save_dataframe(structural_core_df, self.output_dir / f"structural_core.{fmt}", fmt)
-            
-            logger.info("Output files generated successfully")
-            
-        except Exception as e:
-            logger.error(f"Failed to generate output files: {e}")
-            raise
-    
-    def _create_documents_dataframe(self, results: List[PerDocumentExtraction]) -> pd.DataFrame:
-        """Create documents dataframe from processing results."""
-        rows = []
-        
-        for result in results:
-            row = {
-                # Identification
-                "doc_id": result.doc_id,
-                "file_path": result.processing_status.file_path,
-                "file_name": Path(result.processing_status.file_path).name,
-                
-                # PDF metadata
-                "title": result.metadata.title or "",
-                "author": result.metadata.author or "",
-                "creation_date": result.metadata.creation_date,
-                "subject": result.metadata.subject or "",
-                
-                # Content-derived front matter
-                "content_title": result.front_matter.title if result.front_matter else "",
-                "content_authors": "|".join(result.front_matter.authors) if result.front_matter else "",
-                "affiliations": "|".join(result.front_matter.affiliations) if result.front_matter else "",
-                "emails": "|".join(result.front_matter.emails) if result.front_matter else "",
-                "urls": "|".join(result.front_matter.urls) if result.front_matter else "",
-                "funding_statements": "|".join(result.front_matter.funding_statements) if result.front_matter else "",
-                "linked_studies": "|".join(result.front_matter.linked_studies) if result.front_matter else "",
-                
-                # Processing info
-                "processing_timestamp": result.processing_status.processing_timestamp,
-                "processing_duration_seconds": result.processing_status.processing_duration_seconds,
-                "likely_scanned": result.processing_status.likely_scanned,
-                "text_extraction_quality": result.processing_status.text_extraction_quality,
-                
-                # Document metrics
-                **result.metrics.model_dump(),
-                
-                # Summary counts
-                "frames_present": len([f for f in result.frame_assessments if f.decision == "present"]),
-                "frames_absent": len([f for f in result.frame_assessments if f.decision == "absent"]),
-                "policy_mix_present": result.policy_mix_present,
-                "recommendations_count": len(result.policy_extractions),
-            }
-            
-            rows.append(row)
-        
-        return pd.DataFrame(rows)
-    
-    def _create_frames_dataframe(self, results: List[PerDocumentExtraction]) -> pd.DataFrame:
-        """Create frames dataframe from processing results."""
-        rows = []
-        
-        for result in results:
-            for assessment in result.frame_assessments:
-                # Prepare evidence text
-                evidence_quotes = [clean_text_for_csv(ev.quote, 200) for ev in assessment.evidence]
-                evidence_pages = [str(ev.page) for ev in assessment.evidence]
-                
-                row = {
-                    "doc_id": result.doc_id,
-                    "frame_id": assessment.frame_id,
-                    "frame_label": assessment.frame_label,
-                    "decision": assessment.decision,
-                    "confidence": assessment.confidence,
-                    "evidence_count": len(assessment.evidence),
-                    "evidence_quotes": " | ".join(evidence_quotes),
-                    "evidence_pages": ",".join(evidence_pages),
-                    "rationale": clean_text_for_csv(assessment.rationale, 300),
-                    "counterevidence_count": len(assessment.counterevidence)
-                }
-                
-                rows.append(row)
-        
-        return pd.DataFrame(rows)
-    
-    def _create_recommendations_dataframe(self, results: List[PerDocumentExtraction]) -> pd.DataFrame:
-        """Create recommendations dataframe from processing results.
 
-        MIGRATION (Prompt 4): Now reads from ``policy_extractions`` and
-        emits richer columns including extraction_type, source_section,
-        raw text fields, and sub-component lists.
-        """
-        rows = []
-        
-        for result in results:
-            for ext in result.policy_extractions:
-                # Prepare evidence text
-                evidence_quotes = [clean_text_for_csv(ev.quote, 200) for ev in ext.evidence]
-                evidence_pages = [str(ev.page) for ev in ext.evidence]
-                
+        # Load configs
+        self.config = load_yaml_config(self.config_dir / "config.yaml")
+        self.frames = load_yaml_config(self.config_dir / "frames.yaml").get("frames", [])
+
+        # Module switches
+        modules = self.config.get("modules", {})
+        self.enable_front_matter = modules.get("front_matter", True)
+        self.enable_structural_core = modules.get("structural_core", True)
+        self.enable_frames = modules.get("frames", True)
+        self.enable_recommendations = modules.get("recommendations", True)
+
+        # Initialize components
+        pdf_cfg = self.config.get("pdf", {})
+        self.pdf_extractor = PDFExtractor(
+            method=pdf_cfg.get("extract_method", "pymupdf"),
+            preserve_layout=pdf_cfg.get("preserve_layout", True),
+            max_pages=pdf_cfg.get("max_pages", 0),
+            max_file_size_mb=pdf_cfg.get("max_file_size_mb", 50),
+        )
+        self.metrics_calculator = MetricsCalculator()
+
+        # LLM client (optional, created on first use)
+        self._llm_client: Optional[LLMClient] = None
+        self._frame_detector: Optional[FrameDetector] = None
+        self._recommendation_extractor: Optional[RecommendationExtractor] = None
+
+        # Content-hash cache
+        self._hash_cache: Dict[str, str] = {}
+
+        ensure_output_directories(self.output_dir)
+
+    # ── Lazy LLM initialization ───────────────────────────────────────
+
+    @property
+    def llm_client(self) -> LLMClient:
+        if self._llm_client is None:
+            api_key = get_env_var("OPENAI_API_KEY", required=True)
+            oai_cfg = self.config.get("openai", {})
+            self._llm_client = LLMClient(
+                api_key=api_key,
+                model=oai_cfg.get("model", "gpt-4o-mini"),
+                temperature=oai_cfg.get("temperature", 0.1),
+                max_tokens=oai_cfg.get("max_tokens", 4000),
+                timeout=oai_cfg.get("timeout", 60),
+                max_retries=oai_cfg.get("max_retries", 5),
+                retry_delay=oai_cfg.get("retry_delay", 2.0),
+            )
+        return self._llm_client
+
+    @property
+    def frame_detector(self) -> FrameDetector:
+        if self._frame_detector is None:
+            frames_cfg = self.config.get("frames", {})
+            self._frame_detector = FrameDetector(
+                llm_client=self.llm_client,
+                frames_config=self.frames,
+                min_confidence=frames_cfg.get("min_confidence", 0.7),
+                max_spans_per_frame=frames_cfg.get("max_spans_per_frame", 5),
+                context_window=frames_cfg.get("context_window", 500),
+                min_evidence_quotes=frames_cfg.get("min_evidence_quotes", 1),
+                max_evidence_quotes=frames_cfg.get("max_evidence_quotes", 3),
+            )
+        return self._frame_detector
+
+    @property
+    def recommendation_extractor(self) -> RecommendationExtractor:
+        if self._recommendation_extractor is None:
+            rec_cfg = self.config.get("recommendations", {})
+            self._recommendation_extractor = RecommendationExtractor(
+                llm_client=self.llm_client,
+                config=rec_cfg,
+            )
+        return self._recommendation_extractor
+
+    # ── Main entry point ──────────────────────────────────────────────
+
+    def process_documents(
+        self,
+        file_paths: List[Path],
+    ) -> Dict[str, List]:
+        """Process multiple PDFs and write output tables."""
+        results: Dict[str, List] = {
+            "processed": [],
+            "skipped": [],
+            "errors": [],
+        }
+
+        for fp in file_paths:
+            try:
+                doc_id = create_document_id(fp)
+                file_hash = self.pdf_extractor.compute_file_hash(fp)
+
+                if not self.force_reprocess and self._is_cached(doc_id, file_hash):
+                    results["skipped"].append(doc_id)
+                    continue
+
+                extraction = self._process_single(fp, doc_id, file_hash)
+                results["processed"].append(extraction)
+
+                # Write audit file
+                audit_path = self.output_dir / "audit" / f"{doc_id}.json"
+                save_json(extraction.model_dump(), audit_path)
+
+            except Exception as exc:
+                logger.error(f"Failed to process {fp}: {exc}")
+                results["errors"].append(f"{fp}: {exc}")
+
+        # Generate output tables from all processed results
+        if results["processed"]:
+            self._generate_output_files(results["processed"])
+
+        return results
+
+    def _is_cached(self, doc_id: str, file_hash: str) -> bool:
+        cached = self._hash_cache.get(doc_id)
+        if cached == file_hash:
+            logger.info(f"[{doc_id}] Unchanged (hash match), skipping")
+            return True
+        return False
+
+    # ── Single-document processing ────────────────────────────────────
+
+    def _process_single(
+        self,
+        file_path: Path,
+        doc_id: str,
+        file_hash: str,
+    ) -> PerDocumentExtraction:
+        start = time.time()
+        warnings: List[str] = []
+
+        # 1. PDF extraction
+        pages, metadata = self.pdf_extractor.extract(file_path)
+        likely_scanned, quality = self.pdf_extractor.detect_scanned(pages)
+        if likely_scanned:
+            warnings.append("Document appears to be scanned / image-only")
+
+        # 2. Metrics
+        metrics = self.metrics_calculator.calculate_metrics(pages)
+
+        # 3. Front matter (LLM)
+        front_matter: Optional[DocumentFrontMatter] = None
+        if self.enable_front_matter and not likely_scanned:
+            try:
+                front_matter = self._extract_front_matter(pages)
+            except Exception as exc:
+                logger.warning(f"[{doc_id}] Front-matter extraction failed: {exc}")
+                warnings.append(f"Front-matter failed: {exc}")
+
+        # 4. Structural core (LLM)
+        structural_core: Optional[StructuralCoreResult] = None
+        if self.enable_structural_core and not likely_scanned:
+            try:
+                structural_core = self._extract_structural_core(pages)
+            except Exception as exc:
+                logger.warning(f"[{doc_id}] Structural-core extraction failed: {exc}")
+                warnings.append(f"Structural-core failed: {exc}")
+
+        # 5. Frame detection
+        frame_assessments: List[FrameAssessment] = []
+        policy_mix = False
+        if self.enable_frames and not likely_scanned:
+            try:
+                frame_assessments = self.frame_detector.detect_frames(pages)
+                policy_mix = self.frame_detector.detect_policy_mix(frame_assessments)
+            except Exception as exc:
+                logger.warning(f"[{doc_id}] Frame detection failed: {exc}")
+                warnings.append(f"Frame detection failed: {exc}")
+
+        # 6. Recommendation extraction
+        policy_extractions: List[PolicyExtraction] = []
+        if self.enable_recommendations and not likely_scanned:
+            try:
+                policy_extractions = self.recommendation_extractor.extract_recommendations(
+                    pages, doc_id
+                )
+            except Exception as exc:
+                logger.warning(f"[{doc_id}] Recommendation extraction failed: {exc}")
+                warnings.append(f"Recommendation extraction failed: {exc}")
+
+        duration = time.time() - start
+
+        status = ProcessingStatus(
+            doc_id=doc_id,
+            file_path=str(file_path),
+            file_hash=file_hash,
+            file_size_bytes=os.path.getsize(file_path),
+            processing_timestamp=datetime.now(),
+            processing_duration_seconds=round(duration, 2),
+            parser_used=self.pdf_extractor.method,
+            likely_scanned=likely_scanned,
+            text_extraction_quality=quality,
+            pages_processed=len(pages),
+            frames_processed=len(frame_assessments),
+            recommendations_extracted=len(policy_extractions),
+            warnings=warnings,
+        )
+
+        self._hash_cache[doc_id] = file_hash
+
+        return PerDocumentExtraction(
+            doc_id=doc_id,
+            pages=pages,
+            metadata=metadata,
+            front_matter=front_matter,
+            metrics=metrics,
+            structural_core=structural_core,
+            frame_assessments=frame_assessments,
+            policy_mix_present=policy_mix,
+            policy_extractions=policy_extractions,
+            processing_status=status,
+        )
+
+    # ── LLM-based front-matter extraction ─────────────────────────────
+
+    def _extract_front_matter(self, pages: List[PageText]) -> DocumentFrontMatter:
+        """Extract front matter from first few + last page via LLM."""
+        # Use first 3 pages and last page
+        sample_pages = pages[:3]
+        if len(pages) > 3:
+            sample_pages.append(pages[-1])
+        text = "\n\n---PAGE BREAK---\n\n".join(
+            f"[Page {p.page_num}]\n{p.text}" for p in sample_pages
+        )
+        # Truncate to avoid token limits
+        if len(text) > 8000:
+            text = text[:8000]
+
+        messages = [
+            {"role": "system", "content": _FRONT_MATTER_PROMPT},
+            {"role": "user", "content": text},
+        ]
+        return self.llm_client.structured_completion(messages, DocumentFrontMatter)
+
+    # ── LLM-based structural core extraction ──────────────────────────
+
+    def _extract_structural_core(self, pages: List[PageText]) -> StructuralCoreResult:
+        """Analyse structural core via broad document sampling + LLM."""
+        # Sample: first 5 pages, middle pages, last 3 pages
+        n = len(pages)
+        indices = set(range(min(5, n)))
+        if n > 10:
+            mid = n // 2
+            indices.update(range(max(0, mid - 1), min(n, mid + 2)))
+        if n > 5:
+            indices.update(range(max(0, n - 3), n))
+        sample = [pages[i] for i in sorted(indices)]
+
+        text = "\n\n---PAGE BREAK---\n\n".join(
+            f"[Page {p.page_num}]\n{p.text}" for p in sample
+        )
+        if len(text) > 10000:
+            text = text[:10000]
+
+        messages = [
+            {"role": "system", "content": _STRUCTURAL_CORE_PROMPT},
+            {"role": "user", "content": text},
+        ]
+        return self.llm_client.structured_completion(messages, StructuralCoreResult)
+
+    # ── Output generation ─────────────────────────────────────────────
+
+    def _generate_output_files(self, results: List[PerDocumentExtraction]) -> None:
+        """Write CSV output tables from extraction results."""
+        self._write_documents_csv(results)
+        self._write_frames_csv(results)
+        self._write_recommendations_csv(results)
+        self._write_structural_core_csv(results)
+
+    def _write_documents_csv(self, results: List[PerDocumentExtraction]) -> None:
+        rows: List[Dict[str, Any]] = []
+        for r in results:
+            row: Dict[str, Any] = {"doc_id": r.doc_id}
+            # Metadata
+            row["title"] = r.metadata.title
+            row["author"] = r.metadata.author
+            # Front matter
+            if r.front_matter:
+                row["fm_title"] = r.front_matter.title
+                row["fm_authors"] = "; ".join(r.front_matter.authors)
+                row["fm_affiliations"] = "; ".join(r.front_matter.affiliations)
+                row["fm_emails"] = "; ".join(r.front_matter.emails)
+                row["fm_urls"] = "; ".join(r.front_matter.urls)
+            # Metrics
+            for k, v in r.metrics.model_dump().items():
+                row[k] = v
+            # Status
+            row["parser_used"] = r.processing_status.parser_used
+            row["likely_scanned"] = r.processing_status.likely_scanned
+            row["text_extraction_quality"] = r.processing_status.text_extraction_quality
+            row["processing_duration_seconds"] = r.processing_status.processing_duration_seconds
+            row["frames_processed"] = r.processing_status.frames_processed
+            row["recommendations_extracted"] = r.processing_status.recommendations_extracted
+            row["policy_mix_present"] = r.policy_mix_present
+            row["warnings"] = "; ".join(r.processing_status.warnings)
+            rows.append(row)
+        save_dataframe(pd.DataFrame(rows), self.output_dir / "documents.csv")
+
+    def _write_frames_csv(self, results: List[PerDocumentExtraction]) -> None:
+        rows: List[Dict[str, Any]] = []
+        for r in results:
+            for fa in r.frame_assessments:
                 row = {
-                    "doc_id": result.doc_id,
-                    "rec_id": ext.rec_id,
-                    "extraction_type": ext.extraction_type.value if ext.extraction_type else "",
-                    "confidence": ext.confidence,
-                    "source_section": ext.source_section.value if ext.source_section else "",
-                    "page": ext.page,
-                    # Raw text fields
-                    "source_text_raw": clean_text_for_csv(ext.source_text_raw, 300),
-                    "actor_text_raw": clean_text_for_csv(ext.actor_text_raw or "", 100),
-                    "actor_type_normalized": ext.actor_type_normalized.value if ext.actor_type_normalized else "",
-                    "action_text_raw": clean_text_for_csv(ext.action_text_raw or "", 200),
-                    "target_text_raw": clean_text_for_csv(ext.target_text_raw or "", 200),
-                    # Classification
-                    "instrument_type": ext.instrument_type.value if ext.instrument_type else "",
-                    "policy_domain": ext.policy_domain or "",
-                    "geographic_scope": ext.geographic_scope.value if ext.geographic_scope else "",
-                    "timeframe": ext.timeframe.value if ext.timeframe else "",
-                    "strength": ext.strength.value if ext.strength else "",
-                    # Sub-components
-                    "expected_outcomes": " | ".join(ext.expected_outcomes),
-                    "implementation_steps": " | ".join(ext.implementation_steps),
-                    "trade_offs": " | ".join(ext.trade_offs),
-                    # Evidence
-                    "evidence_count": len(ext.evidence),
-                    "evidence_quotes": " | ".join(evidence_quotes),
-                    "evidence_pages": ",".join(evidence_pages),
+                    "doc_id": r.doc_id,
+                    "frame_id": fa.frame_id,
+                    "frame_label": fa.frame_label,
+                    "decision": fa.decision.value,
+                    "confidence": fa.confidence,
+                    "evidence_count": len(fa.evidence),
+                    "rationale": clean_text_for_csv(fa.rationale),
                 }
-                
+                if fa.evidence:
+                    row["evidence_1_page"] = fa.evidence[0].page
+                    row["evidence_1_quote"] = clean_text_for_csv(
+                        fa.evidence[0].quote, 500
+                    )
                 rows.append(row)
-        
-        return pd.DataFrame(rows)
-    
-    def _create_sections_dataframe(self, results: List[PerDocumentExtraction]) -> pd.DataFrame:
-        """Create sections dataframe (one row per section per document)."""
-        rows = []
-        
-        for result in results:
-            if not result.section_map:
-                continue
-            for i, section in enumerate(result.section_map.sections):
-                rows.append({
-                    "doc_id": result.doc_id,
-                    "section_index": i,
-                    "raw_title": section.raw_title or "",
-                    "normalized_label": section.normalized_label.value if section.normalized_label else "",
-                    "start_page": section.start_page,
-                    "end_page": section.end_page,
-                    "confidence": section.confidence,
-                    "rule_source": section.rule_source,
-                    "detection_method": result.section_map.detection_method,
-                })
-        
-        return pd.DataFrame(rows)
-    
-    def _create_structural_core_dataframe(self, results: List[PerDocumentExtraction]) -> pd.DataFrame:
-        """Create structural core summary (one row per document)."""
-        rows = []
-        
-        for result in results:
-            if not result.structural_core:
-                continue
-            sc = result.structural_core
-            rows.append({
-                "doc_id": result.doc_id,
-                "problem_status": sc.problem.status.value,
-                "problem_section": sc.problem.matched_section.value if sc.problem.matched_section else "",
-                "problem_labeled": sc.labeling.problem_labeled,
-                "solutions_count": len(sc.solutions),
-                "solutions_explicit": sum(
-                    1 for s in sc.solutions if s.option_type.value == "explicit_option"
-                ),
-                "solutions_labeled": sc.labeling.solutions_labeled,
-                "implementation_status": sc.implementation_status.value,
-                "implementation_count": len(sc.implementation),
-                "implementation_labeled": sc.labeling.implementation_labeled,
-                "narrative_hook_status": sc.narrative_hook.status.value,
-                "narrative_hook_type": sc.narrative_hook.hook_type.value if sc.narrative_hook.hook_type else "",
-            })
-        
-        return pd.DataFrame(rows)
+        save_dataframe(pd.DataFrame(rows), self.output_dir / "frames.csv")
+
+    def _write_recommendations_csv(self, results: List[PerDocumentExtraction]) -> None:
+        rows: List[Dict[str, Any]] = []
+        for r in results:
+            for pe in r.policy_extractions:
+                row = {
+                    "doc_id": r.doc_id,
+                    "rec_id": pe.rec_id,
+                    "extraction_type": pe.extraction_type.value,
+                    "confidence": pe.confidence,
+                    "source_text": clean_text_for_csv(pe.source_text_raw, 500),
+                    "page": pe.page,
+                    "actor_raw": pe.actor_text_raw,
+                    "actor_type": pe.actor_type_normalized.value if pe.actor_type_normalized else None,
+                    "action_raw": clean_text_for_csv(pe.action_text_raw or "", 300),
+                    "target_raw": clean_text_for_csv(pe.target_text_raw or "", 300),
+                    "instrument_type": pe.instrument_type.value if pe.instrument_type else None,
+                    "strength": pe.strength.value if pe.strength else None,
+                    "geographic_scope": pe.geographic_scope.value if pe.geographic_scope else None,
+                    "timeframe": pe.timeframe.value if pe.timeframe else None,
+                    "policy_domain": pe.policy_domain,
+                }
+                rows.append(row)
+        save_dataframe(pd.DataFrame(rows), self.output_dir / "recommendations.csv")
+
+    def _write_structural_core_csv(self, results: List[PerDocumentExtraction]) -> None:
+        rows: List[Dict[str, Any]] = []
+        for r in results:
+            if r.structural_core:
+                row = {"doc_id": r.doc_id}
+                row.update(r.structural_core.model_dump())
+                rows.append(row)
+        if rows:
+            save_dataframe(pd.DataFrame(rows), self.output_dir / "structural_core.csv")
+
+    # ── Summary ───────────────────────────────────────────────────────
+
+    def compute_extraction_summary(
+        self,
+        results: List[PerDocumentExtraction],
+    ) -> Dict[str, Any]:
+        """Compute a summary across processed documents."""
+        total_frames_present = sum(
+            1
+            for r in results
+            for fa in r.frame_assessments
+            if fa.decision.value == "present"
+        )
+        total_extractions = sum(len(r.policy_extractions) for r in results)
+        total_pages = sum(r.metrics.page_count for r in results)
+        warnings_list: List[str] = []
+        for r in results:
+            warnings_list.extend(r.processing_status.warnings)
+
+        return {
+            "documents_processed": len(results),
+            "total_pages": total_pages,
+            "total_frames_present": total_frames_present,
+            "total_extractions": total_extractions,
+            "policy_mix_documents": sum(1 for r in results if r.policy_mix_present),
+            "warnings": warnings_list,
+        }

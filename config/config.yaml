@@ -5,7 +5,6 @@
 # receive None / empty lists when a module is off.
 modules:
   front_matter: true
-  section_segmentation: true
   structural_core: true
   frames: true
   recommendations: true

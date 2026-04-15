@@ -89,7 +89,6 @@ def analyze_results_example(output_dir: Path):
         documents_file = output_dir / "documents.csv"
         frames_file = output_dir / "frames.csv"
         recommendations_file = output_dir / "recommendations.csv"
-        sections_file = output_dir / "sections.csv"
         structural_core_file = output_dir / "structural_core.csv"
         
         if not all(f.exists() for f in [documents_file, frames_file, recommendations_file]):
@@ -105,10 +104,6 @@ def analyze_results_example(output_dir: Path):
         print(f"   Documents processed: {len(documents_df)}")
         print(f"   Total frame assessments: {len(frames_df)}")
         print(f"   Total recommendations: {len(recommendations_df)}")
-        
-        if sections_file.exists():
-            sections_df = pd.read_csv(sections_file)
-            print(f"   Total sections detected: {len(sections_df)}")
         
         if structural_core_file.exists():
             sc_df = pd.read_csv(structural_core_file)

@@ -1,352 +1,174 @@
-"""
-PDF text extraction with layout preservation and metadata extraction.
-
-Supports both PyPDF and PyMuPDF (fitz) for robust extraction across different PDF types.
-"""
+"""PDF text extraction with PyMuPDF (primary) and pypdf (fallback)."""
 
 import hashlib
 import logging
+import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-
-import fitz  # PyMuPDF
-import pypdf
-from pypdf import PdfReader
+from typing import Any, Dict, List, Optional, Tuple
 
 from .models import PDFMetadata, PageText
-
 
 logger = logging.getLogger(__name__)
 
 
 class PDFExtractor:
     """Extract text and metadata from PDF files."""
-    
+
     def __init__(
         self,
-        extract_method: str = "pymupdf",
+        method: str = "pymupdf",
         preserve_layout: bool = True,
         max_pages: int = 0,
-        max_file_size_mb: int = 50
+        max_file_size_mb: int = 50,
     ):
-        """
-        Initialize PDF extractor.
-        
-        Args:
-            extract_method: "pypdf" or "pymupdf"  
-            preserve_layout: Whether to attempt layout preservation
-            max_pages: Maximum pages to process (0 = no limit)
-            max_file_size_mb: Skip files larger than this (MB)
-        """
-        self.extract_method = extract_method
+        self.method = method
         self.preserve_layout = preserve_layout
         self.max_pages = max_pages
         self.max_file_size_mb = max_file_size_mb
-        
-        if extract_method not in ["pypdf", "pymupdf"]:
-            raise ValueError(f"Unsupported extract method: {extract_method}")
-    
-    def extract_document(self, file_path: Path) -> Tuple[List[PageText], PDFMetadata, Dict]:
-        """
-        Extract text and metadata from PDF file.
-        
-        Args:
-            file_path: Path to PDF file
-            
-        Returns:
-            Tuple of (pages, metadata, extraction_info)
-            
-        Raises:
-            ValueError: If file is too large or invalid
-            Exception: If extraction fails
-        """
-        logger.info(f"Extracting PDF: {file_path}")
-        
-        # Check file size
-        file_size = file_path.stat().st_size
-        if self.max_file_size_mb > 0 and file_size > (self.max_file_size_mb * 1024 * 1024):
-            raise ValueError(f"File too large: {file_size / (1024*1024):.1f}MB > {self.max_file_size_mb}MB")
-        
-        # Extract based on method
-        if self.extract_method == "pymupdf":
-            return self._extract_with_fitz(file_path)
-        else:
-            return self._extract_with_pypdf(file_path)
-    
-    def _extract_with_fitz(self, file_path: Path) -> Tuple[List[PageText], PDFMetadata, Dict]:
-        """Extract using PyMuPDF (fitz) - better layout preservation."""
+
+    # ── Public API ────────────────────────────────────────────────────
+
+    def extract(self, file_path: Path) -> Tuple[List[PageText], PDFMetadata]:
+        """Extract pages and metadata from a PDF file."""
+        self._validate_file(file_path)
+
+        if self.method == "pymupdf":
+            try:
+                return self._extract_with_fitz(file_path)
+            except ImportError:
+                logger.warning("PyMuPDF not available, falling back to pypdf")
+                return self._extract_with_pypdf(file_path)
+        return self._extract_with_pypdf(file_path)
+
+    def compute_file_hash(self, file_path: Path) -> str:
+        """SHA-256 hash of the file (for caching / dedup)."""
+        h = hashlib.sha256()
+        with open(file_path, "rb") as f:
+            for chunk in iter(lambda: f.read(8192), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
+    def detect_scanned(self, pages: List[PageText]) -> Tuple[bool, float]:
+        """Heuristic: is this likely a scanned / image-only PDF?"""
+        if not pages:
+            return True, 0.0
+        total_chars = sum(p.char_count for p in pages)
+        avg_chars = total_chars / len(pages)
+        # Scanned PDFs typically yield < 50 chars per page
+        if avg_chars < 50:
+            return True, 0.0
+        quality = min(1.0, avg_chars / 500)
+        return False, round(quality, 3)
+
+    # ── PyMuPDF backend ───────────────────────────────────────────────
+
+    def _extract_with_fitz(self, file_path: Path) -> Tuple[List[PageText], PDFMetadata]:
+        import fitz
+
+        doc = fitz.open(str(file_path))
         try:
-            doc = fitz.open(file_path)
-            
-            # Extract metadata
-            metadata = self._extract_fitz_metadata(doc)
-            
-            # Extract pages
-            pages = []
-            total_pages = len(doc)
-            max_pages = self.max_pages if self.max_pages > 0 else total_pages
-            
-            extraction_info = {
-                "total_pages": total_pages,
-                "pages_processed": min(total_pages, max_pages),
-                "likely_scanned": False,
-                "text_extraction_quality": 1.0,
-                "layout_lines": [],
-            }
-            
-            # Track scanned document detection
-            text_lengths = []
-            
-            for page_num in range(min(total_pages, max_pages)):
-                page = doc[page_num]
-                
+            metadata = self._parse_fitz_metadata(doc.metadata or {})
+            pages: List[PageText] = []
+            page_limit = self.max_pages or len(doc)
+
+            for idx in range(min(len(doc), page_limit)):
+                page = doc[idx]
                 if self.preserve_layout:
-                    # Get text with layout info
-                    text = page.get_text("dict")
-                    page_text = self._process_fitz_layout(text)
-                    # Collect per-line layout features for section segmentation
-                    extraction_info["layout_lines"].extend(
-                        self._extract_line_features(text, page_num + 1)
-                    )
+                    text = self._extract_layout_text(page)
                 else:
-                    # Simple text extraction
-                    page_text = page.get_text()
-                
-                # Clean text
-                page_text = self._clean_text(page_text)
-                
-                # Count stats
-                char_count = len(page_text)
-                word_count = len(page_text.split()) if page_text else 0
-                text_lengths.append(char_count)
-                
+                    text = page.get_text("text") or ""
+                words = text.split()
                 pages.append(PageText(
-                    page_num=page_num + 1,  # 1-based
-                    text=page_text,
-                    char_count=char_count,
-                    word_count=word_count
+                    page_num=idx + 1,
+                    text=text,
+                    char_count=len(text),
+                    word_count=len(words),
                 ))
-            
+            return pages, metadata
+        finally:
             doc.close()
-            
-            # Detect likely scanned documents
-            if text_lengths:
-                avg_text_length = sum(text_lengths) / len(text_lengths)
-                extraction_info["likely_scanned"] = avg_text_length < 100
-                
-                # Quality estimate based on text density
-                expected_chars_per_page = 2000  # Rough estimate
-                quality = min(1.0, avg_text_length / expected_chars_per_page)
-                extraction_info["text_extraction_quality"] = max(0.1, quality)
-            
-            return pages, metadata, extraction_info
-            
-        except Exception as e:
-            logger.error(f"Fitz extraction failed for {file_path}: {e}")
-            raise
-    
-    def _extract_with_pypdf(self, file_path: Path) -> Tuple[List[PageText], PDFMetadata, Dict]:
-        """Extract using PyPDF - fallback option."""
-        try:
-            with open(file_path, 'rb') as file:
-                reader = PdfReader(file)
-                
-                # Extract metadata
-                metadata = self._extract_pypdf_metadata(reader)
-                
-                # Extract pages
-                pages = []
-                total_pages = len(reader.pages)
-                max_pages = self.max_pages if self.max_pages > 0 else total_pages
-                
-                extraction_info = {
-                    "total_pages": total_pages,
-                    "pages_processed": min(total_pages, max_pages),
-                    "likely_scanned": False,
-                    "text_extraction_quality": 0.8  # Lower than fitz
-                }
-                
-                text_lengths = []
-                
-                for page_num in range(min(total_pages, max_pages)):
-                    page = reader.pages[page_num]
-                    page_text = page.extract_text()
-                    
-                    # Clean text
-                    page_text = self._clean_text(page_text)
-                    
-                    # Count stats
-                    char_count = len(page_text)
-                    word_count = len(page_text.split()) if page_text else 0
-                    text_lengths.append(char_count)
-                    
-                    pages.append(PageText(
-                        page_num=page_num + 1,  # 1-based
-                        text=page_text,
-                        char_count=char_count,
-                        word_count=word_count
-                    ))
-                
-                # Detect likely scanned documents
-                if text_lengths:
-                    avg_text_length = sum(text_lengths) / len(text_lengths)
-                    extraction_info["likely_scanned"] = avg_text_length < 100
-                
-                return pages, metadata, extraction_info
-                
-        except Exception as e:
-            logger.error(f"PyPDF extraction failed for {file_path}: {e}")
-            raise
-    
-    def _process_fitz_layout(self, text_dict: Dict) -> str:
-        """Process PyMuPDF text dict to preserve layout."""
-        lines = []
-        
-        for block in text_dict.get("blocks", []):
-            if "lines" in block:  # Text block
-                for line in block["lines"]:
-                    line_text = ""
-                    for span in line["spans"]:
-                        line_text += span["text"]
-                    
-                    if line_text.strip():
-                        lines.append(line_text.strip())
-            
+
+    def _extract_layout_text(self, page: Any) -> str:
+        """Extract text preserving layout via text blocks."""
+        blocks = page.get_text("blocks") or []
+        text_blocks = sorted(
+            (b for b in blocks if b[6] == 0),  # type 0 = text
+            key=lambda b: (b[1], b[0]),  # sort by y then x
+        )
+        lines: List[str] = []
+        for b in text_blocks:
+            block_text = b[4].strip() if b[4] else ""
+            if block_text:
+                lines.append(block_text)
         return "\n".join(lines)
 
     @staticmethod
-    def _extract_line_features(text_dict: Dict, page_num: int) -> List[Dict]:
-        """Extract per-line layout features from a fitz text dict.
-
-        Returns list of dicts with keys: page_num, text, font_size, is_bold.
-        """
-        features: List[Dict] = []
-        for block in text_dict.get("blocks", []):
-            if "lines" not in block:
-                continue
-            for line in block["lines"]:
-                spans = line.get("spans", [])
-                if not spans:
-                    continue
-                line_text = "".join(s.get("text", "") for s in spans).strip()
-                if not line_text:
-                    continue
-                # Use the max font size across spans in the line
-                max_size = max((s.get("size", 0) for s in spans), default=0)
-                # Bold if any span's font name contains "Bold" (common convention)
-                is_bold = any("bold" in (s.get("font", "") or "").lower() for s in spans)
-                features.append({
-                    "page_num": page_num,
-                    "text": line_text,
-                    "font_size": round(max_size, 1),
-                    "is_bold": is_bold,
-                })
-        return features
-
-    def _extract_fitz_metadata(self, doc) -> PDFMetadata:
-        """Extract metadata using PyMuPDF."""
-        meta = doc.metadata
-        
-        def parse_date(date_str: Optional[str]) -> Optional[datetime]:
-            """Parse PDF date string."""
-            if not date_str:
+    def _parse_fitz_metadata(raw: Dict[str, Any]) -> PDFMetadata:
+        def _parse_date(val: Optional[str]) -> Optional[datetime]:
+            if not val:
                 return None
-            
-            # Remove PDF date prefix if present
-            if date_str.startswith("D:"):
-                date_str = date_str[2:]
-            
-            # Try common formats
-            for fmt in ["%Y%m%d%H%M%S", "%Y%m%d", "%Y-%m-%d"]:
+            for fmt in ("%Y%m%d%H%M%S", "%Y-%m-%d", "%Y%m%d"):
+                cleaned = re.sub(r"^D:", "", val).split("+")[0].split("-")[0]
                 try:
-                    return datetime.strptime(date_str[:len(fmt)], fmt)
-                except ValueError:
+                    return datetime.strptime(cleaned[:len(fmt.replace("%", ""))], fmt)
+                except (ValueError, IndexError):
                     continue
-            
             return None
-        
+
         return PDFMetadata(
-            title=meta.get("title"),
-            author=meta.get("author"), 
-            subject=meta.get("subject"),
-            creator=meta.get("creator"),
-            producer=meta.get("producer"),
-            creation_date=parse_date(meta.get("creationDate")),
-            modification_date=parse_date(meta.get("modDate"))
+            title=raw.get("title") or None,
+            author=raw.get("author") or None,
+            subject=raw.get("subject") or None,
+            creator=raw.get("creator") or None,
+            producer=raw.get("producer") or None,
+            creation_date=_parse_date(raw.get("creationDate")),
+            modification_date=_parse_date(raw.get("modDate")),
         )
-    
-    def _extract_pypdf_metadata(self, reader: PdfReader) -> PDFMetadata:
-        """Extract metadata using PyPDF."""
-        meta = reader.metadata
-        
+
+    # ── pypdf backend ─────────────────────────────────────────────────
+
+    def _extract_with_pypdf(self, file_path: Path) -> Tuple[List[PageText], PDFMetadata]:
+        from pypdf import PdfReader
+
+        reader = PdfReader(str(file_path))
+        metadata = self._parse_pypdf_metadata(reader.metadata)
+        pages: List[PageText] = []
+        page_limit = self.max_pages or len(reader.pages)
+
+        for idx in range(min(len(reader.pages), page_limit)):
+            text = reader.pages[idx].extract_text() or ""
+            words = text.split()
+            pages.append(PageText(
+                page_num=idx + 1,
+                text=text,
+                char_count=len(text),
+                word_count=len(words),
+            ))
+        return pages, metadata
+
+    @staticmethod
+    def _parse_pypdf_metadata(meta: Any) -> PDFMetadata:
         if not meta:
             return PDFMetadata()
-        
-        def safe_get(key: str) -> Optional[str]:
-            """Safely get metadata field."""
-            try:
-                value = meta.get(key)
-                return str(value) if value else None
-            except:
-                return None
-        
         return PDFMetadata(
-            title=safe_get("/Title"),
-            author=safe_get("/Author"),
-            subject=safe_get("/Subject"),
-            creator=safe_get("/Creator"),
-            producer=safe_get("/Producer"),
-            # PyPDF date handling is complex, skip for now
+            title=getattr(meta, "title", None),
+            author=getattr(meta, "author", None),
+            subject=getattr(meta, "subject", None),
+            creator=getattr(meta, "creator", None),
+            producer=getattr(meta, "producer", None),
         )
-    
-    def _clean_text(self, text: str) -> str:
-        """Clean extracted text."""
-        if not text:
-            return ""
-        
-        # Normalize whitespace
-        text = re.sub(r'\s+', ' ', text)
-        
-        # Remove common artifacts
-        text = re.sub(r'[^\w\s\.\,\!\?\;\:\-\(\)\[\]\"\'\/\@\#\$\%\&\*\+\=\<\>\{\}\|\\\~\`]', '', text)
-        
-        # Remove excessive dots (from OCR artifacts)
-        text = re.sub(r'\.{4,}', '...', text)
-        
-        return text.strip()
-    
-    def extract_headings(self, pages: List[PageText]) -> List[str]:
-        """Extract potential document headings."""
-        headings = []
-        
-        for page in pages:
-            lines = page.text.split('\n')
-            
-            for line in lines:
-                line = line.strip()
-                
-                # Simple heading detection heuristics
-                if (line and 
-                    len(line) < 100 and  # Not too long
-                    len(line.split()) >= 2 and  # At least 2 words
-                    not line.endswith('.') and  # No sentence endings
-                    (line.isupper() or  # All caps
-                     line.istitle() or  # Title case
-                     re.match(r'^\d+\.?\s+[A-Z]', line))):  # Numbered heading
-                    
-                    headings.append(line)
-        
-        return headings
-    
-    @staticmethod
-    def compute_file_hash(file_path: Path) -> str:
-        """Compute SHA256 hash of file for change detection."""
-        hash_sha256 = hashlib.sha256()
-        
-        with open(file_path, "rb") as f:
-            for chunk in iter(lambda: f.read(4096), b""):
-                hash_sha256.update(chunk)
-        
-        return hash_sha256.hexdigest()
+
+    # ── Validation ────────────────────────────────────────────────────
+
+    def _validate_file(self, file_path: Path) -> None:
+        if not file_path.exists():
+            raise FileNotFoundError(f"PDF not found: {file_path}")
+        if not file_path.suffix.lower() == ".pdf":
+            raise ValueError(f"Not a PDF file: {file_path}")
+        size_mb = os.path.getsize(file_path) / (1024 * 1024)
+        if self.max_file_size_mb and size_mb > self.max_file_size_mb:
+            raise ValueError(
+                f"File too large: {size_mb:.1f} MB (limit {self.max_file_size_mb} MB)"
+            )

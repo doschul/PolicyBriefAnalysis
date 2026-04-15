@@ -1,19 +1,18 @@
 # Policy Brief Analysis Pipeline
 
-A reproducible research pipeline for automated analysis of policy brief PDFs. The pipeline extracts structured metadata, detects theoretical policy-instrument frames, and identifies policy recommendations using LLM-powered structured outputs.
+A reproducible research pipeline for automated analysis of policy brief PDFs. The pipeline extracts structured metadata, detects theoretical policy-instrument frames, and identifies policy recommendations using an LLM-first architecture with deterministic guardrails.
 
 ## Overview
 
-The pipeline processes a collection of PDF policy briefs through six sequential extraction stages:
+The pipeline processes PDF policy briefs through five sequential extraction stages:
 
-1. **PDF extraction** — text and metadata from PDF files (PyMuPDF / PyPDF)
-2. **Front-matter extraction** — content-derived metadata (title, authors, affiliations, emails, URLs, funding)
-3. **Section segmentation** — heading detection and section labelling using font-size heuristics
-4. **Structural core analysis** — identifies whether the document contains a problem statement, proposed solutions, and implementation details
-5. **Frame detection** — classifies the document against five policy-instrument categories with evidence quotes
-6. **Recommendation extraction** — identifies prescriptive policy statements using a candidate-span + LLM classification architecture
+1. **PDF extraction** — text and metadata from PDF files (PyMuPDF / pypdf)
+2. **Front-matter extraction** — content-derived metadata via LLM (title, authors, affiliations, emails, URLs, funding)
+3. **Structural core analysis** — LLM-based assessment of problem identification, solutions, implementation details, and narrative hooks
+4. **Frame detection** — two-stage classification (keyword pre-filter + LLM) against five policy-instrument categories
+5. **Recommendation extraction** — deterministic candidate generation (prescriptive-language filter + citation rejection) followed by batched LLM classification
 
-Each stage is independently toggleable via configuration. If any stage fails at runtime, the pipeline logs a warning and continues processing the remaining stages (graceful degradation).
+Each stage is independently toggleable via configuration. If any stage fails at runtime, the pipeline logs a warning and continues with the remaining stages (graceful degradation). Without an API key, all LLM-dependent stages degrade gracefully and the pipeline still produces PDF metrics and metadata.
 
 ## Quick Start
 
@@ -67,8 +66,7 @@ pipeline = PolicyBriefPipeline(
 pdf_files = list(Path("data/policy_briefs").glob("*.pdf"))
 results = pipeline.process_documents(pdf_files)
 
-# Lightweight evaluation summary
-summary = pipeline.compute_extraction_summary(results)
+summary = pipeline.compute_extraction_summary(results["processed"])
 print(summary)
 ```
 
@@ -78,32 +76,34 @@ print(summary)
 - **OpenAI API key** with access to a model supporting structured outputs (e.g. `gpt-4o-mini`, `gpt-4o`)
 - PDF policy briefs for analysis
 
+### Dependencies
+
+PyMuPDF (fitz), pypdf, pandas, pyarrow, click, pyyaml, openai, pydantic, tenacity, textstat, python-dotenv
+
 ## Architecture
 
 ```
 PolicyBriefAnalysis/
 ├── cli.py                          # Click-based CLI (extract, validate-config)
-├── example.py                      # Programmatic usage example
 ├── config/
 │   ├── config.yaml                 # Pipeline settings and module switches
 │   ├── frames.yaml                 # Theoretical frame definitions
 │   └── enums.yaml                  # Controlled vocabularies
 ├── src/policybrief/
-│   ├── pipeline.py                 # Main orchestrator
-│   ├── pdf_extractor.py            # PDF text/metadata extraction
-│   ├── frame_detector.py           # Two-stage frame detection
-│   ├── recommendation_extractor.py # Candidate-span recommendation extraction
-│   ├── llm_client.py               # OpenAI client with schema patching
-│   ├── metrics_calculator.py       # Structural/linguistic/readability metrics
-│   ├── models.py                   # Pydantic data models and enums
-│   └── utils.py                    # Shared helpers
-├── tests/                          # pytest suite (~200 tests)
+│   ├── pipeline.py                 # Main orchestrator (inline LLM calls for front-matter & structural core)
+│   ├── pdf_extractor.py            # PDF text/metadata extraction (PyMuPDF + pypdf fallback)
+│   ├── frame_detector.py           # Two-stage frame detection (keyword + LLM)
+│   ├── recommendation_extractor.py # Candidate-span recommendation extraction (prescriptive filter + LLM)
+│   ├── llm_client.py               # OpenAI client with schema patching and retry
+│   ├── metrics_calculator.py       # Document metrics (readability, structure)
+│   ├── models.py                   # Pydantic V2 data models and enums
+│   └── utils.py                    # Shared helpers (I/O, config, text cleaning)
+├── tests/                          # pytest suite (93 tests)
 └── output/                         # Generated outputs
-    ├── documents.csv / .parquet
-    ├── frames.csv / .parquet
-    ├── recommendations.csv / .parquet
-    ├── sections.csv / .parquet
-    ├── structural_core.csv / .parquet
+    ├── documents.csv
+    ├── frames.csv
+    ├── recommendations.csv
+    ├── structural_core.csv
     └── audit/                      # Per-document JSON audit trails
 ```
 
@@ -111,59 +111,54 @@ PolicyBriefAnalysis/
 
 ### 1. PDF Extraction (`pdf_extractor.py`)
 
-Extracts per-page text and PDF-level metadata using PyMuPDF (primary) or PyPDF (fallback).
+Extracts per-page text and PDF-level metadata using PyMuPDF (primary) or pypdf (fallback).
 
 - Per-page text with word/character counts
 - PDF metadata: title, author, subject, creator, dates
-- Layout line features (font size, bold flags) for downstream section detection
-- Scanned-document detection via text-density heuristics (< 100 chars/page)
+- Layout-preserving text extraction via text-block sorting
+- Scanned-document detection via text-density heuristics (< 50 chars/page average)
 - Text extraction quality score (0–1)
-- File content hashing (SHA-256) for incremental processing
+- SHA-256 file hashing for incremental processing
 
-### 2. Front-Matter Extraction
+### 2. Front-Matter Extraction (inline LLM in `pipeline.py`)
 
-Extracts content-derived metadata from the first pages of the document:
+Extracts content-derived metadata from the first few pages of the document via a single LLM call:
 
-- Document title and author names (parsed from text, not PDF metadata)
+- Document title, author names
 - Institutional affiliations, email addresses, URLs
 - Funding statements and linked study references
+- Uses first 3 pages + last page as input (truncated to 8,000 chars)
 
-### 3. Section Segmentation
+### 3. Structural Core Analysis (inline LLM in `pipeline.py`)
 
-Identifies document sections from PDF layout features:
-
-- Detects headings using relative font-size thresholds
-- Assigns normalized labels to recognized section types (e.g. `introduction`, `recommendations`, `references`)
-- Provides a section map used by downstream modules to scope their analysis
-
-### 4. Structural Core Analysis
-
-Determines whether the document follows a standard policy-brief structure:
+Determines whether the document follows a standard policy-brief structure via a single LLM call:
 
 | Component | Detection |
 |---|---|
-| Problem statement | Presence and explicitness of a described problem |
-| Solutions | Count of proposed solutions, whether explicitly labelled |
-| Implementation details | Presence of implementation steps or guidance |
-| Narrative hook | Whether the brief opens with an anecdote, statistic, or question |
+| Problem statement | Presence (`present` / `weak` / `absent`) and summary |
+| Solutions | Count of distinct solutions, whether explicitly proposed |
+| Implementation details | Presence and count of implementation considerations |
+| Narrative hook | Whether the brief opens with a case study, statistic, anecdote, or question |
 
-### 5. Frame Detection (`frame_detector.py`)
+Uses a sampled set of pages (first 5 + middle + last 3) truncated to 10,000 chars.
 
-Classifies each document against five policy-instrument categories derived from the smart-regulation literature. Detection uses a two-stage approach to balance cost and accuracy.
+### 4. Frame Detection (`frame_detector.py`)
 
-**Stage 1 — Keyword-based span selection** (no LLM calls):
+Classifies each document against five policy-instrument categories derived from the smart-regulation literature. Uses a two-stage approach to balance cost and accuracy.
+
+**Stage 1 — Keyword-based span selection** (deterministic, no LLM calls):
 - Matches inclusion cues from `frames.yaml` against the full text
-- Applies exclusion cues (score × 0.3) and must-have boosts (score × 2.0)
 - Extracts context windows (default 500 chars) around keyword hits
-- Returns top-N candidate spans per frame
+- Deduplicates overlapping spans
+- Returns top-N candidate spans per frame (default 5)
 
 **Stage 2 — LLM assessment** (one API call per frame):
 - Sends candidate spans plus the frame definition to the LLM
-- Returns a structured `FrameAssessment`: decision (`present` / `absent` / `insufficient_evidence`), confidence score, evidence quotes with page numbers, rationale, and counterevidence
-- Validates evidence quotes verbatim against source pages
+- Returns a structured `FrameDetectionOutput`: decision (`present` / `absent` / `insufficient_evidence`), confidence score, evidence quotes, and rationale
+- Validates evidence quotes verbatim against source text (with fuzzy prefix fallback)
+- Applies confidence threshold (default 0.7) and minimum evidence requirements
 
-**Policy-mix detection**:
-- Flags documents where ≥ 2 frames are marked `present` AND the text contains explicit policy-mix language (`"policy mix"`, `"instrument mix"`, `"complementarity"`, `"smart regulation"`, etc.)
+**Policy-mix detection**: Flags documents where ≥ 2 distinct frames are marked `present` with sufficient confidence.
 
 #### Frame Definitions (`config/frames.yaml`)
 
@@ -177,56 +172,63 @@ Classifies each document against five policy-instrument categories derived from 
 
 Each frame definition includes analytical notes, positive examples, and false-positive guidance to steer the LLM.
 
-### 6. Recommendation Extraction (`recommendation_extractor.py`)
+### 5. Recommendation Extraction (`recommendation_extractor.py`)
 
 Identifies and classifies prescriptive policy statements using a candidate-span architecture.
 
+**Reference-page exclusion** (deterministic):
+- Detects the start of the references/bibliography section by scanning the last 40% of the document for headings like "References", "Bibliography", "Works Cited"
+- Excludes all pages from the references section onward
+
 **Candidate generation** (deterministic):
-- Splits text into sentence-level spans
-- Restricts candidates to target sections: `recommendations`, `key_messages`, `executive_summary`, `policy_options`, `implementation`, `conclusion`
-- Excludes reference-heavy sections: `references`, `acknowledgements`, `about_authors`, `appendix`
-- Filters for prescriptive language (`should`, `must`, `recommend`, `propose`, `call for`, `urge`, `ensure`, etc.)
-- Rejects citation-heavy spans (≥ 2 citation patterns like `(Author, Year)`, `[1]`, `et al.`)
+- Splits text into sentence-level spans (regex-based)
+- Filters for prescriptive language: `should`, `must`, `need to`, `recommend`, `propose`, `suggest`, `call for`, `urge`, `require`, `ensure`, `promote`, `encourage`, `implement`, `establish`, `strengthen`, `foster`, `prioritize`, `advocate`, `advise`
+- Rejects citation-heavy spans (> 40% citation markup by character count)
+- Skips sentences shorter than 5 words
 
 **LLM classification** (batched, 10 candidates per API call):
-- Classifies each candidate into one of: `recommendation`, `policy_option`, `implementation_step`, `expected_outcome`, `trade_off`, `actor_responsibility`, `non_recommendation`
-- Extracts structured fields: actor (normalized), action, target, instrument type, geographic scope, timeframe, strength
-- Provides evidence quotes with page numbers
+- Classifies each candidate into: `recommendation`, `policy_option`, `implementation_step`, `expected_outcome`, `trade_off`, `actor_responsibility`, or `non_recommendation`
+- Extracts structured fields: actor (raw + normalized type), action, target, instrument type, strength
+- Applies minimum confidence threshold (default 0.6)
 
-**Controlled vocabularies** (from `config/enums.yaml`):
+**Post-validation**:
+- Verifies candidate source text exists in the original document (whitespace-normalized)
+- Normalizes actor types, instrument types, and recommendation strength via keyword mapping
+- Requires evidence for recommendations and policy options
+
+**Controlled vocabularies** (defined in `models.py`):
 - **Actor types** (9): government, EU institutions, international organizations, private sector, civil society, research institutions, individuals, multiple actors, unspecified
 - **Instrument types** (12): regulation, subsidy, tax, information, voluntary, planning, monitoring, research, procurement, infrastructure, institutional, other
 - **Geographic scope** (11): local → global, EU, bilateral, multilateral, transboundary, unspecified
-- **Timeframe** (6): immediate (< 1 yr), short-term (1–3 yr), medium-term (3–10 yr), long-term (> 10 yr), ongoing, unspecified
+- **Timeframe** (6): immediate, short-term, medium-term, long-term, ongoing, unspecified
 - **Strength** (6): must, should, could, may, consider, unspecified
 
 ### Document Metrics (`metrics_calculator.py`)
 
-Computes 20+ metrics per document:
+Computes per-document metrics:
 
 | Category | Metrics |
 |---|---|
-| Structural | page count, word count, char count, heading count, paragraph count, sentence count, list item count |
-| Linguistic | average sentence length, lexical diversity (type-token ratio), average word length, passive voice % |
+| Structural | page count, word count, char count, paragraph count, sentence count |
+| Linguistic | average sentence length, lexical diversity (type-token ratio), average word length |
 | Readability | Flesch-Kincaid grade level, Flesch reading ease |
-| Content density | table count, figure count, reference count, URL count |
+| Content | URL count, email count |
 
 ## Output Format
 
-The pipeline produces five output tables (CSV + Parquet) and per-document audit files.
+The pipeline produces four CSV output tables and per-document audit files.
 
 ### `documents.csv`
 
-One row per document. Contains PDF metadata, front-matter fields, all computed metrics, and summary counts.
+One row per document. Contains PDF metadata, front-matter fields, metrics, and summary counts.
 
 | Column group | Key columns |
 |---|---|
-| Identity | `doc_id`, `file_path`, `file_name` |
-| PDF metadata | `title`, `author`, `creation_date`, `subject` |
-| Front matter | `content_title`, `content_authors`, `affiliations`, `emails`, `urls`, `funding_statements`, `linked_studies` |
-| Processing | `processing_timestamp`, `processing_duration_seconds`, `likely_scanned`, `text_extraction_quality` |
-| Metrics | `page_count`, `word_count`, `char_count`, `heading_count`, `paragraph_count`, `sentence_count`, `list_item_count`, `avg_sentence_length`, `lexical_diversity`, `avg_word_length`, `flesch_kincaid_grade`, `flesch_reading_ease`, `table_count`, `figure_count`, `reference_count`, `url_count`, `passive_voice_percent` |
-| Summary | `frames_present`, `frames_absent`, `policy_mix_present`, `recommendations_count` |
+| Identity | `doc_id`, `title` (PDF metadata), `author` |
+| Front matter | `fm_title`, `fm_authors`, `fm_affiliations`, `fm_emails`, `fm_urls` |
+| Metrics | `page_count`, `word_count`, `char_count`, `sentence_count`, `paragraph_count`, `avg_sentence_length`, `lexical_diversity`, `avg_word_length`, `flesch_kincaid_grade`, `flesch_reading_ease`, `url_count`, `email_count` |
+| Processing | `parser_used`, `likely_scanned`, `text_extraction_quality`, `processing_duration_seconds` |
+| Summary | `frames_processed`, `recommendations_extracted`, `policy_mix_present`, `warnings` |
 
 ### `frames.csv`
 
@@ -240,49 +242,30 @@ One row per document × frame (5 rows per document by default).
 | `decision` | `present`, `absent`, or `insufficient_evidence` |
 | `confidence` | 0–1 confidence score |
 | `evidence_count` | Number of supporting quotes |
-| `evidence_quotes` | Pipe-separated verbatim quotes |
-| `evidence_pages` | Comma-separated page numbers |
+| `evidence_1_page` | Page number of first evidence quote |
+| `evidence_1_quote` | Text of first evidence quote |
 | `rationale` | LLM-generated reasoning |
-| `counterevidence_count` | Number of contradicting quotes |
 
 ### `recommendations.csv`
 
-One row per extracted recommendation.
+One row per extracted recommendation / policy extraction.
 
 | Column | Description |
 |---|---|
 | `doc_id` | Document identifier |
-| `rec_id` | Recommendation ID (`doc_XX_rec_NN`) |
+| `rec_id` | Recommendation ID (`doc_XX_rec_NNN`) |
 | `extraction_type` | `recommendation`, `policy_option`, `implementation_step`, `expected_outcome`, `trade_off`, `actor_responsibility` |
 | `confidence` | 0–1 confidence score |
-| `source_section` | Section where the span was found |
+| `source_text` | Original text span (truncated to 500 chars) |
 | `page` | Source page number |
-| `source_text_raw` | Original text span |
-| `actor_text_raw`, `actor_type_normalized` | Who should act |
-| `action_text_raw` | What action is recommended |
-| `target_text_raw` | What/whom the action targets |
+| `actor_raw`, `actor_type` | Who should act (raw text + normalized type) |
+| `action_raw` | What action is recommended |
+| `target_raw` | What/whom the action targets |
 | `instrument_type` | Policy instrument category |
-| `policy_domain` | Policy area |
+| `strength` | Prescriptive strength (must/should/could/may/consider) |
 | `geographic_scope` | Spatial scope |
 | `timeframe` | Temporal horizon |
-| `strength` | Prescriptive strength (must/should/could/may/consider) |
-| `expected_outcomes`, `implementation_steps`, `trade_offs` | Additional detail fields |
-| `evidence_count`, `evidence_quotes`, `evidence_pages` | Supporting evidence |
-
-### `sections.csv`
-
-One row per detected text segment.
-
-| Column | Description |
-|---|---|
-| `doc_id` | Document identifier |
-| `section_index` | Sequential position in document |
-| `raw_title` | Original text of the segment heading or line |
-| `normalized_label` | Standardized section label (if recognized) |
-| `start_page`, `end_page` | Page range |
-| `confidence` | Detection confidence |
-| `rule_source` | Which heuristic matched |
-| `detection_method` | How the section was identified |
+| `policy_domain` | Policy area |
 
 ### `structural_core.csv`
 
@@ -291,23 +274,23 @@ One row per document describing structural completeness.
 | Column | Description |
 |---|---|
 | `doc_id` | Document identifier |
-| `problem_status` | Whether a problem statement was found |
-| `problem_section` | Which section contains the problem |
-| `problem_labeled` | Whether the section is explicitly labelled |
+| `problem_status` | `present`, `weak`, or `absent` |
+| `problem_summary` | Brief description of the identified problem |
 | `solutions_count` | Number of proposed solutions |
-| `solutions_explicit`, `solutions_labeled` | Explicitness flags |
-| `implementation_status` | Whether implementation details are present |
-| `implementation_count`, `implementation_labeled` | Implementation detail flags |
-| `narrative_hook_status` | Whether a narrative hook opens the brief |
-| `narrative_hook_type` | Type of hook (anecdote, statistic, question) |
+| `solutions_explicit` | Whether solutions are explicitly proposed |
+| `implementation_status` | `present`, `weak`, or `absent` |
+| `implementation_count` | Number of implementation considerations |
+| `narrative_hook_present` | Whether a narrative hook is used |
+| `narrative_hook_type` | Type of hook (statistic, case study, anecdote, question) |
 
 ### `audit/<doc_id>.json`
 
 Per-document JSON file containing the complete extraction record:
 
+- All extracted pages with full text
 - PDF metadata and front-matter results
-- Section map and structural-core assessment
-- All frame assessments with full LLM context
+- Structural-core assessment
+- All frame assessments with evidence quotes and LLM rationale
 - All recommendation extractions with classification detail
 - Processing status, warnings, and timing
 
@@ -320,13 +303,12 @@ Each extraction stage can be independently enabled or disabled:
 ```yaml
 modules:
   front_matter: true
-  section_segmentation: true
   structural_core: true
   frames: true
   recommendations: true
 ```
 
-Disabled modules are skipped entirely (no LLM calls). Downstream stages receive `None` and adapt accordingly.
+Disabled modules are skipped entirely (no LLM calls). Downstream stages receive `None` / empty lists.
 
 ### OpenAI Settings
 
@@ -362,48 +344,31 @@ recommendations:
     - must
     - need to
     # ...
-  target_sections:               # Where to search for recommendations
-    - recommendation
-    - conclusion
-    - summary
-    - policy implication
-    # ...
-```
-
-### Processing and Output
-
-```yaml
-processing:
-  max_workers: 1                 # Concurrent threads
-  batch_size: 10
-  incremental: true              # Skip unchanged files (hash-based)
-  hash_algorithm: "sha256"
-
-output:
-  formats: [csv, parquet, json]
-  generate_audit: true
-  compress_json: true
-  include_raw_text: false
-
-validation:
-  verify_quotes: true
-  max_quote_length: 500
-  min_quote_length: 20
-  strict_schema: true
 ```
 
 ## LLM Integration (`llm_client.py`)
 
-The pipeline uses OpenAI's structured output mode to enforce JSON schema compliance on all LLM responses.
+The pipeline uses OpenAI's structured output mode (JSON schema) to enforce type-safe responses from all LLM calls. All responses are validated against Pydantic V2 models.
 
 **Schema patching**: Pydantic V2 model schemas are automatically patched before each API call to satisfy OpenAI's strict-mode requirements:
-1. All object properties added to `required`
-2. `additionalProperties: false` set on all object types
+1. All object properties listed in `required`
+2. `additionalProperties: false` on every object
 3. Sibling keywords stripped from `$ref` nodes
 
-**Retry logic**: Exponential backoff for transient errors (rate limits, timeouts, server errors). Schema validation failures are retried up to 2 times with error feedback appended to the prompt.
+**Retry logic**: Exponential backoff for transient errors (rate limits, timeouts, server errors). Schema validation failures are retried up to 2 times with error feedback appended to the conversation.
 
-**Token optimization**: The two-stage frame detection sends only relevant text spans (not full documents) to the LLM, reducing token costs significantly for long documents.
+**Token optimization**: Frame detection sends only keyword-matched context windows (not full documents) to the LLM. Front-matter and structural-core extraction sample specific pages rather than sending the entire document.
+
+### API call budget per document
+
+| Stage | LLM calls | Input |
+|---|---|---|
+| Front-matter | 1 | First 3 pages + last page (≤ 8K chars) |
+| Structural core | 1 | Sampled pages: first 5 + middle + last 3 (≤ 10K chars) |
+| Frame detection | up to 5 | Keyword-matched spans per frame |
+| Recommendations | N / 10 | Batches of 10 prescriptive candidates |
+
+A typical 20-page policy brief generates ~10 API calls. Longer documents with many prescriptive sentences generate proportionally more recommendation classification calls.
 
 ## CLI Reference
 
@@ -441,44 +406,32 @@ pytest tests/test_integration.py -v
 pytest tests/test_models.py -v
 ```
 
-The test suite includes ~200 tests covering:
-- Unit tests for all extraction modules
+The test suite includes 93 tests covering:
+- Pydantic model validation and enum handling
+- Frame detection logic (keyword matching, assessment, policy-mix)
+- Recommendation extraction (references detection, prescriptive cues, citation rejection, candidate generation)
+- Pipeline initialization, single-document processing, output generation
 - Integration tests for module switches and graceful degradation
-- Output format validation (CSV/Parquet schema correctness)
 - Evaluation summary computation
-- Cache-based incremental processing
-- Backward compatibility
 
 ## Known Limitations
 
 1. **No OCR support** — Scanned PDFs are detected (`likely_scanned` flag) but not processed. The pipeline requires text-based PDFs.
 
-2. **Quote validation is approximate** — The LLM generates evidence quotes that are validated verbatim against source pages. Minor paraphrasing or whitespace differences cause validation warnings. Unvalidated quotes are still included but flagged.
+2. **Quote validation is approximate** — Evidence quotes generated by the LLM are validated verbatim against source text (with whitespace normalization and a 40-char prefix fallback). Minor paraphrasing causes validation failures and the evidence is silently dropped.
 
-3. **Section segmentation granularity** — The segmenter operates at the text-block level based on font-size heuristics. For documents with inconsistent formatting, this may produce very granular segments rather than logical sections.
+3. **LLM candidate count mismatches** — When the LLM returns fewer classifications than candidates submitted (batch classification), the shortfall is padded with `non_recommendation`.
 
-4. **LLM candidate count mismatches** — When the LLM returns fewer classifications than candidates submitted (batch classification), the shortfall is padded with `non_recommendation`. A warning is logged.
+4. **Single-language support** — The pipeline is designed for English-language policy briefs. Frame keywords, prescriptive-language cues, and LLM prompts are all English-only.
 
-5. **Single-language support** — The pipeline is designed for English-language policy briefs. Frame keywords, prescriptive-language cues, and LLM prompts are all English-only.
+5. **Token cost scales with candidate count** — Recommendation extraction makes one LLM call per batch of 10 candidates. Documents with many prescriptive sentences (e.g. 260 candidates for a 170-page report) can require 27+ API calls for recommendations alone.
 
-6. **Token cost scales with document length** — Frame detection makes one LLM call per frame per document (5 calls/doc by default). Recommendation extraction makes one call per batch of 10 candidates. Long documents with many prescriptive sentences will generate more API calls.
+6. **Deterministic but not reproducible across models** — Results are relatively stable at temperature 0.1 for a given model version, but switching models (e.g. `gpt-4o-mini` to `gpt-4o`) or model versions will produce different extractions.
 
-7. **Deterministic but not reproducible across models** — Results are deterministic at temperature 0.1 for a given model version, but switching models (e.g. `gpt-4o-mini` to `gpt-4o`) will produce different extractions.
+7. **Instrument type and strength often unset** — The LLM classification conservatively returns `null` for instrument type and recommendation strength when not clearly determinable from the source text. These fields are populated only when the LLM has high confidence.
 
-8. **Pydantic V2 deprecation warnings** — Some models use V1-style `@validator` decorators. These work correctly but produce deprecation warnings under Pydantic V2.
+8. **References detection uses positional heuristic** — The references/bibliography section is detected by scanning headings in the last 40% of the document. Documents with unconventional structure (e.g. short front-matter containing "Reference" citation lines) are handled correctly by this constraint, but documents with references sections in the middle may not be detected.
 
 ## License
 
 MIT License — see LICENSE file for details.
-
-## 🙋 Support
-
-For questions and support:
-1. Check this README and configuration examples
-2. Review test files for usage patterns
-3. Examine audit outputs for debugging
-4. Open an issue with detailed error information
-
----
-
-**Built for reproducible policy research** 📊🔬
