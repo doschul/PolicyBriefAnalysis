@@ -1,13 +1,14 @@
-"""Tests for frame detector: keyword selection, quote validation, policy mix."""
+"""Tests for broad-content frame detector: LLM assessment, quote validation, policy mix, aggregation."""
 
 import pytest
-import re
 
 from src.policybrief.models import (
     Evidence,
     FrameAssessment,
     FrameDecision,
+    FrameExtractionResponse,
     PageText,
+    SingleFrameResult,
 )
 from src.policybrief.frame_detector import FrameDetector
 
@@ -26,7 +27,6 @@ SAMPLE_FRAMES = [
         "short_definition": "Legally binding rules backed by state authority.",
         "analytical_notes": "The defining logic is legal compulsion.",
         "false_positive_notes": "",
-        "inclusion_cues": ["regulation", "law", "enforcement", "penalty", "compliance"],
     },
     {
         "id": "economic_instruments",
@@ -34,76 +34,78 @@ SAMPLE_FRAMES = [
         "short_definition": "Financial incentives including PES and subsidies.",
         "analytical_notes": "The defining logic is financial incentive.",
         "false_positive_notes": "",
-        "inclusion_cues": ["subsidy", "payment", "PES", "carbon credit", "incentive"],
     },
 ]
 
 
-class FakeLLM:
+class FakeLLMAbsent:
     """Mock LLM that returns absent for all frames."""
     def structured_completion(self, messages, response_model):
-        from src.policybrief.models import FrameDetectionOutput, FrameDecision
-        # Parse frame_id from user message
-        user_msg = messages[-1]["content"]
-        frame_id = "unknown"
-        if "frame_id='" in user_msg:
-            start = user_msg.index("frame_id='") + len("frame_id='")
-            end = user_msg.index("'", start)
-            frame_id = user_msg[start:end]
-        return FrameDetectionOutput(
-            frame_id=frame_id,
-            decision=FrameDecision.ABSENT,
-            confidence=0.2,
-            evidence=[],
-            rationale="No evidence found by mock LLM",
-        )
+        return FrameExtractionResponse(frames=[
+            SingleFrameResult(
+                frame_id="command_and_control",
+                decision=FrameDecision.ABSENT,
+                confidence=0.1,
+                evidence=[],
+                rationale="No legal compulsion found",
+            ),
+            SingleFrameResult(
+                frame_id="economic_instruments",
+                decision=FrameDecision.ABSENT,
+                confidence=0.1,
+                evidence=[],
+                rationale="No financial instruments found",
+            ),
+        ])
 
 
 class FakeLLMPresent:
-    """Mock LLM that returns present with evidence."""
+    """Mock LLM that returns present for command_and_control with evidence."""
     def __init__(self, quote="The government requires all operators to obtain permits"):
         self.quote = quote
 
     def structured_completion(self, messages, response_model):
-        from src.policybrief.models import FrameDetectionOutput, FrameDecision, Evidence
-        user_msg = messages[-1]["content"]
-        frame_id = "unknown"
-        if "frame_id='" in user_msg:
-            start = user_msg.index("frame_id='") + len("frame_id='")
-            end = user_msg.index("'", start)
-            frame_id = user_msg[start:end]
-        return FrameDetectionOutput(
-            frame_id=frame_id,
-            decision=FrameDecision.PRESENT,
-            confidence=0.92,
-            evidence=[Evidence(page=1, quote=self.quote)],
-            rationale="Strong evidence of the frame",
-        )
+        return FrameExtractionResponse(frames=[
+            SingleFrameResult(
+                frame_id="command_and_control",
+                decision=FrameDecision.PRESENT,
+                confidence=0.92,
+                evidence=[Evidence(page=1, quote=self.quote)],
+                rationale="Strong evidence of legal compulsion",
+            ),
+            SingleFrameResult(
+                frame_id="economic_instruments",
+                decision=FrameDecision.ABSENT,
+                confidence=0.1,
+                evidence=[],
+                rationale="No financial instruments found",
+            ),
+        ])
 
 
-# ── Keyword span selection ────────────────────────────────────────────────
+class FakeLLMBothPresent:
+    """Mock LLM that returns present for both frames."""
+    def __init__(self, quote1, quote2):
+        self.quote1 = quote1
+        self.quote2 = quote2
 
-class TestKeywordSpans:
-    def test_finds_keyword_matches(self):
-        detector = FrameDetector(
-            llm_client=FakeLLM(), frames_config=SAMPLE_FRAMES,
-            min_confidence=0.7, context_window=100,
-        )
-        text = "The new regulation requires compliance from all operators."
-        text_by_page = {1: text}
-        spans = detector._find_keyword_spans("command_and_control", text, text_by_page)
-        assert len(spans) > 0
-        assert any("regulation" in s["keyword"].lower() for s in spans)
-
-    def test_no_matches_returns_empty(self):
-        detector = FrameDetector(
-            llm_client=FakeLLM(), frames_config=SAMPLE_FRAMES,
-            min_confidence=0.7,
-        )
-        text = "Forests are beautiful and diverse ecosystems."
-        text_by_page = {1: text}
-        spans = detector._find_keyword_spans("command_and_control", text, text_by_page)
-        assert len(spans) == 0
+    def structured_completion(self, messages, response_model):
+        return FrameExtractionResponse(frames=[
+            SingleFrameResult(
+                frame_id="command_and_control",
+                decision=FrameDecision.PRESENT,
+                confidence=0.9,
+                evidence=[Evidence(page=1, quote=self.quote1)],
+                rationale="Legal compulsion found",
+            ),
+            SingleFrameResult(
+                frame_id="economic_instruments",
+                decision=FrameDecision.PRESENT,
+                confidence=0.85,
+                evidence=[Evidence(page=1, quote=self.quote2)],
+                rationale="Financial instruments found",
+            ),
+        ])
 
 
 # ── Quote validation ──────────────────────────────────────────────────────
@@ -111,7 +113,7 @@ class TestKeywordSpans:
 class TestQuoteValidation:
     def test_exact_match(self):
         detector = FrameDetector(
-            llm_client=FakeLLM(), frames_config=SAMPLE_FRAMES,
+            llm_client=FakeLLMAbsent(), frames_config=SAMPLE_FRAMES,
         )
         source = "The government requires all operators to obtain permits for logging."
         evidence = [Evidence(page=1, quote="The government requires all operators to obtain permits")]
@@ -120,12 +122,22 @@ class TestQuoteValidation:
 
     def test_no_match_rejected(self):
         detector = FrameDetector(
-            llm_client=FakeLLM(), frames_config=SAMPLE_FRAMES,
+            llm_client=FakeLLMAbsent(), frames_config=SAMPLE_FRAMES,
         )
         source = "Forests cover 30% of land."
         evidence = [Evidence(page=1, quote="This quote does not appear in the source text at all")]
         validated = detector._validate_quotes(evidence, source)
         assert len(validated) == 0
+
+    def test_prefix_match_accepted(self):
+        detector = FrameDetector(
+            llm_client=FakeLLMAbsent(), frames_config=SAMPLE_FRAMES,
+        )
+        source = "The government requires all operators to obtain permits and comply with regulations."
+        evidence = [Evidence(page=1, quote="The government requires all operators to obtain permits and report annually")]
+        validated = detector._validate_quotes(evidence, source)
+        # First 40 chars match → accepted
+        assert len(validated) == 1
 
 
 # ── Policy mix detection ─────────────────────────────────────────────────
@@ -133,7 +145,7 @@ class TestQuoteValidation:
 class TestPolicyMix:
     def test_two_frames_present(self):
         detector = FrameDetector(
-            llm_client=FakeLLM(), frames_config=SAMPLE_FRAMES,
+            llm_client=FakeLLMAbsent(), frames_config=SAMPLE_FRAMES,
             min_confidence=0.7,
         )
         ev = Evidence(page=1, quote="A sufficiently long evidence quote for testing")
@@ -153,7 +165,7 @@ class TestPolicyMix:
 
     def test_one_frame_no_mix(self):
         detector = FrameDetector(
-            llm_client=FakeLLM(), frames_config=SAMPLE_FRAMES,
+            llm_client=FakeLLMAbsent(), frames_config=SAMPLE_FRAMES,
             min_confidence=0.7,
         )
         ev = Evidence(page=1, quote="A sufficiently long evidence quote for testing")
@@ -171,13 +183,33 @@ class TestPolicyMix:
         ]
         assert detector.detect_policy_mix(assessments) is False
 
+    def test_low_confidence_no_mix(self):
+        detector = FrameDetector(
+            llm_client=FakeLLMAbsent(), frames_config=SAMPLE_FRAMES,
+            min_confidence=0.7,
+        )
+        ev = Evidence(page=1, quote="A sufficiently long evidence quote for testing")
+        assessments = [
+            FrameAssessment(
+                frame_id="command_and_control", frame_label="CaC",
+                decision=FrameDecision.PRESENT, confidence=0.9,
+                evidence=[ev], rationale="Found",
+            ),
+            FrameAssessment(
+                frame_id="economic_instruments", frame_label="EI",
+                decision=FrameDecision.PRESENT, confidence=0.5,
+                evidence=[ev], rationale="Weak",
+            ),
+        ]
+        assert detector.detect_policy_mix(assessments) is False
+
 
 # ── Full frame detection with mock LLM ───────────────────────────────────
 
 class TestFrameDetection:
-    def test_no_keywords_returns_absent(self):
+    def test_absent_for_generic_text(self):
         detector = FrameDetector(
-            llm_client=FakeLLM(), frames_config=SAMPLE_FRAMES,
+            llm_client=FakeLLMAbsent(), frames_config=SAMPLE_FRAMES,
             min_confidence=0.7,
         )
         pages = _make_pages(["Forests are beautiful ecosystems with many species."])
@@ -185,37 +217,84 @@ class TestFrameDetection:
         assert len(assessments) == 2
         assert all(a.decision == FrameDecision.ABSENT for a in assessments)
 
-    def test_with_keywords_calls_llm(self):
-        """When keywords match, the LLM is called (fake returns absent)."""
-        detector = FrameDetector(
-            llm_client=FakeLLM(), frames_config=SAMPLE_FRAMES,
-            min_confidence=0.7,
-        )
-        text = (
-            "The new forest regulation requires strict compliance from "
-            "all logging operators. Penalties for non-compliance include fines."
-        )
-        pages = _make_pages([text])
-        assessments = detector.detect_frames(pages)
-        # command_and_control should have been sent to LLM (has keyword matches)
-        # But FakeLLM returns absent
-        assert len(assessments) == 2
-
     def test_present_with_valid_evidence(self):
-        """LLM returns present + evidence that exists in source."""
         text = (
-            "The new regulation requires all operators to obtain permits "
+            "The government requires all operators to obtain permits "
             "and ensures compliance before any logging activity can commence."
         )
         detector = FrameDetector(
             llm_client=FakeLLMPresent(
-                quote="The new regulation requires all operators to obtain permits"
+                quote="The government requires all operators to obtain permits"
             ),
-            frames_config=[SAMPLE_FRAMES[0]],  # Only command_and_control
+            frames_config=SAMPLE_FRAMES,
             min_confidence=0.7,
         )
         pages = _make_pages([text])
         assessments = detector.detect_frames(pages)
-        assert len(assessments) == 1
-        assert assessments[0].decision == FrameDecision.PRESENT
-        assert assessments[0].confidence > 0.7
+        assert len(assessments) == 2
+        cac = next(a for a in assessments if a.frame_id == "command_and_control")
+        assert cac.decision == FrameDecision.PRESENT
+        assert cac.confidence > 0.7
+
+    def test_present_downgraded_when_evidence_not_in_text(self):
+        """If evidence quote doesn't match source text, decision is downgraded."""
+        text = "Forests are beautiful ecosystems that support biodiversity."
+        detector = FrameDetector(
+            llm_client=FakeLLMPresent(
+                quote="The government requires all operators to obtain permits"
+            ),
+            frames_config=SAMPLE_FRAMES,
+            min_confidence=0.7,
+        )
+        pages = _make_pages([text])
+        assessments = detector.detect_frames(pages)
+        cac = next(a for a in assessments if a.frame_id == "command_and_control")
+        # Evidence doesn't match → downgraded to insufficient_evidence
+        assert cac.decision == FrameDecision.INSUFFICIENT_EVIDENCE
+
+    def test_no_pages_returns_absent(self):
+        detector = FrameDetector(
+            llm_client=FakeLLMAbsent(), frames_config=SAMPLE_FRAMES,
+        )
+        assessments = detector.detect_frames([])
+        assert len(assessments) == 2
+        assert all(a.decision == FrameDecision.ABSENT for a in assessments)
+
+    def test_excluded_pages_respected(self):
+        """Pages in excluded_pages set are not processed."""
+        text = "The government requires all operators to obtain permits for logging."
+        detector = FrameDetector(
+            llm_client=FakeLLMAbsent(), frames_config=SAMPLE_FRAMES,
+        )
+        pages = _make_pages([text, "Second page content."])
+        # Exclude both pages → no content → absent
+        assessments = detector.detect_frames(pages, excluded_pages={1, 2})
+        assert all(a.decision == FrameDecision.ABSENT for a in assessments)
+
+    def test_both_frames_present_policy_mix(self):
+        quote1 = "The regulation mandates strict compliance"
+        quote2 = "PES payments provide financial incentives"
+        text = f"{quote1} for operators. {quote2} for conservation."
+        detector = FrameDetector(
+            llm_client=FakeLLMBothPresent(quote1=quote1, quote2=quote2),
+            frames_config=SAMPLE_FRAMES,
+            min_confidence=0.7,
+        )
+        pages = _make_pages([text])
+        assessments = detector.detect_frames(pages)
+        assert detector.detect_policy_mix(assessments) is True
+
+
+# ── Absent assessment helper ──────────────────────────────────────────────
+
+class TestAbsentAssessment:
+    def test_absent_assessment_fields(self):
+        detector = FrameDetector(
+            llm_client=FakeLLMAbsent(), frames_config=SAMPLE_FRAMES,
+        )
+        a = detector._absent_assessment(SAMPLE_FRAMES[0], "No data")
+        assert a.frame_id == "command_and_control"
+        assert a.decision == FrameDecision.ABSENT
+        assert a.confidence == 0.0
+        assert a.evidence == []
+        assert a.rationale == "No data"

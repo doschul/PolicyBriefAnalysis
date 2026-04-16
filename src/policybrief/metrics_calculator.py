@@ -11,6 +11,13 @@ logger = logging.getLogger(__name__)
 _URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 _EMAIL_RE = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+")
 
+# Passive voice heuristic: "be"-form + past participle (-ed, -en, or common irregulars)
+_BE_FORMS = r"(?:is|are|was|were|be|been|being)"
+_PASSIVE_RE = re.compile(
+    rf"\b{_BE_FORMS}\s+(?:\w+\s+){{0,2}}(?:\w+(?:ed|en|wn|lt|pt|nt|ught|ade|ung|orn|oken|iven|tten|one))\b",
+    re.IGNORECASE,
+)
+
 
 class MetricsCalculator:
     """Compute basic document metrics from extracted page text."""
@@ -51,6 +58,7 @@ class MetricsCalculator:
             flesch_reading_ease=fk_ease,
             url_count=len(_URL_RE.findall(full_text)),
             email_count=len(_EMAIL_RE.findall(full_text)),
+            passive_voice_share=self._passive_voice_share(sentences),
         )
 
     # ── Internals ─────────────────────────────────────────────────────
@@ -60,6 +68,17 @@ class MetricsCalculator:
         """Cheap sentence splitter (regex-based)."""
         raw = re.split(r"(?<=[.!?])\s+", text)
         return [s.strip() for s in raw if len(s.strip()) > 5]
+
+    @staticmethod
+    def _passive_voice_share(sentences: List[str]) -> Optional[float]:
+        """Heuristic passive-voice share based on be-form + past-participle patterns.
+
+        This is a lightweight approximation, not full grammatical parsing.
+        """
+        if not sentences:
+            return None
+        passive_count = sum(1 for s in sentences if _PASSIVE_RE.search(s))
+        return round(passive_count / len(sentences), 4)
 
     @staticmethod
     def _flesch_kincaid_grade(text: str) -> Optional[float]:

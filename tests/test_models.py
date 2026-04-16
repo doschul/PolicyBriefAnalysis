@@ -5,15 +5,13 @@ from datetime import datetime
 
 from src.policybrief.models import (
     ActorType,
-    CandidateClassification,
-    CandidateClassificationBatch,
     DocumentFrontMatter,
     DocumentMetrics,
     Evidence,
     ExtractionType,
     FrameAssessment,
     FrameDecision,
-    FrameDetectionOutput,
+    FrameExtractionResponse,
     GeographicScope,
     InstrumentType,
     PDFMetadata,
@@ -21,7 +19,10 @@ from src.policybrief.models import (
     PerDocumentExtraction,
     PolicyExtraction,
     ProcessingStatus,
+    RecommendationExtractionResponse,
+    RecommendationItem,
     RecommendationStrength,
+    SingleFrameResult,
     StructuralCoreResult,
     Timeframe,
 )
@@ -157,6 +158,10 @@ class TestStructuralCoreResult:
         sc = StructuralCoreResult()
         assert sc.problem_status == "absent"
         assert sc.solutions_count == 0
+        assert sc.problem_explicitly_labelled is False
+        assert sc.solutions_explicitly_labelled is False
+        assert sc.implementation_explicitly_labelled is False
+        assert sc.procedural_clarity_status == "absent"
 
     def test_full(self):
         sc = StructuralCoreResult(
@@ -168,21 +173,114 @@ class TestStructuralCoreResult:
             implementation_count=1,
             narrative_hook_present=True,
             narrative_hook_type="statistic",
+            problem_explicitly_labelled=True,
+            solutions_explicitly_labelled=True,
+            implementation_explicitly_labelled=False,
+            procedural_clarity_status="present",
         )
         assert sc.solutions_explicit is True
+        assert sc.problem_explicitly_labelled is True
+        assert sc.procedural_clarity_status == "present"
 
-
-# ── CandidateClassificationBatch ─────────────────────────────────────────
-
-class TestCandidateClassificationBatch:
-    def test_batch(self):
-        c = CandidateClassification(
-            extraction_type=ExtractionType.NON_RECOMMENDATION,
-            confidence=0.1,
-            rejection_reason="Not prescriptive",
+    def test_procedural_clarity_distinct_from_implementation(self):
+        """procedural_clarity_status can differ from implementation_status."""
+        sc = StructuralCoreResult(
+            implementation_status="present",
+            procedural_clarity_status="absent",
         )
-        batch = CandidateClassificationBatch(classifications=[c])
-        assert len(batch.classifications) == 1
+        assert sc.implementation_status == "present"
+        assert sc.procedural_clarity_status == "absent"
+
+    def test_heading_labelled_with_implicit_structure(self):
+        """A document can have present content but no explicit heading labels."""
+        sc = StructuralCoreResult(
+            problem_status="present",
+            problem_explicitly_labelled=False,
+            solutions_explicit=True,
+            solutions_explicitly_labelled=False,
+        )
+        assert sc.problem_status == "present"
+        assert sc.problem_explicitly_labelled is False
+
+
+# ── RecommendationItem / RecommendationExtractionResponse ─────────────────
+
+class TestRecommendationItem:
+    def test_valid(self):
+        item = RecommendationItem(
+            extraction_type=ExtractionType.RECOMMENDATION,
+            confidence=0.85,
+            source_quote="Governments should strengthen forest monitoring systems",
+            page=3,
+            actor_text_raw="Governments",
+            action_text_raw="strengthen forest monitoring systems",
+        )
+        assert item.confidence == 0.85
+        assert item.page == 3
+
+    def test_minimal(self):
+        item = RecommendationItem(
+            extraction_type=ExtractionType.TRADE_OFF,
+            confidence=0.6,
+            source_quote="There is a trade-off between conservation and growth",
+            page=5,
+        )
+        assert item.actor_text_raw is None
+        assert item.instrument_type is None
+
+    def test_response_empty_items(self):
+        resp = RecommendationExtractionResponse(items=[])
+        assert len(resp.items) == 0
+
+    def test_response_with_items(self):
+        item = RecommendationItem(
+            extraction_type=ExtractionType.RECOMMENDATION,
+            confidence=0.9,
+            source_quote="Member states must implement monitoring systems",
+            page=1,
+        )
+        resp = RecommendationExtractionResponse(items=[item])
+        assert len(resp.items) == 1
+
+
+# ── SingleFrameResult / FrameExtractionResponse ──────────────────────────
+
+class TestSingleFrameResult:
+    def test_valid(self):
+        fr = SingleFrameResult(
+            frame_id="command_and_control",
+            decision=FrameDecision.PRESENT,
+            confidence=0.9,
+            evidence=[Evidence(page=1, quote="The regulation requires compliance from all operators")],
+            rationale="Clear legal compulsion",
+        )
+        assert fr.frame_id == "command_and_control"
+
+    def test_absent(self):
+        fr = SingleFrameResult(
+            frame_id="economic_instruments",
+            decision=FrameDecision.ABSENT,
+            confidence=0.1,
+            evidence=[],
+            rationale="No financial mechanisms discussed",
+        )
+        assert fr.decision == FrameDecision.ABSENT
+
+    def test_frame_extraction_response(self):
+        frames = [
+            SingleFrameResult(
+                frame_id="f1", decision=FrameDecision.ABSENT,
+                confidence=0.1, evidence=[], rationale="Not found",
+            ),
+            SingleFrameResult(
+                frame_id="f2", decision=FrameDecision.PRESENT,
+                confidence=0.85,
+                evidence=[Evidence(page=2, quote="PES payments provide incentives for conservation")],
+                rationale="Clear economic instrument",
+            ),
+        ]
+        resp = FrameExtractionResponse(frames=frames)
+        assert len(resp.frames) == 2
 
 
 # ── Enums ─────────────────────────────────────────────────────────────────
@@ -221,7 +319,12 @@ class TestSerialisation:
         fm2 = DocumentFrontMatter.model_validate(data)
         assert fm2.title == "Test Brief"
 
-    def test_frame_detection_output_json_schema(self):
-        schema = FrameDetectionOutput.model_json_schema()
+    def test_frame_extraction_response_json_schema(self):
+        schema = FrameExtractionResponse.model_json_schema()
         assert "properties" in schema
-        assert "frame_id" in schema["properties"]
+        assert "frames" in schema["properties"]
+
+    def test_recommendation_extraction_response_json_schema(self):
+        schema = RecommendationExtractionResponse.model_json_schema()
+        assert "properties" in schema
+        assert "items" in schema["properties"]

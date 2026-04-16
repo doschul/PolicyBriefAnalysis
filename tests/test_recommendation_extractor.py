@@ -1,37 +1,45 @@
-"""Tests for recommendation extraction: references exclusion, filters, normalisation."""
+"""Tests for broad-content recommendation extraction: DocumentContent, evidence
+verification, deduplication, normalization, references exclusion."""
 
 import pytest
 
 from src.policybrief.models import (
     ActorType,
-    CandidateClassification,
+    Evidence,
     ExtractionType,
     InstrumentType,
     PageText,
+    PolicyExtraction,
+    RecommendationExtractionResponse,
+    RecommendationItem,
     RecommendationStrength,
 )
 from src.policybrief.recommendation_extractor import (
+    DocumentContent,
     RecommendationExtractor,
-    _has_prescriptive_cue,
-    _is_citation_heavy,
+    _deduplicate_extractions,
     _normalize_actor,
     _normalize_instrument,
     _normalize_strength,
     detect_references_start_page,
+    verify_evidence,
 )
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────
+
+def _pages(texts):
+    return [
+        PageText(page_num=i + 1, text=t, char_count=len(t), word_count=len(t.split()))
+        for i, t in enumerate(texts)
+    ]
 
 
 # ── References page detection ─────────────────────────────────────────────
 
 class TestReferencesDetection:
-    def _pages(self, texts):
-        return [
-            PageText(page_num=i + 1, text=t, char_count=len(t), word_count=len(t.split()))
-            for i, t in enumerate(texts)
-        ]
-
     def test_finds_references_heading(self):
-        pages = self._pages([
+        pages = _pages([
             "Introduction text here.",
             "Some policy content.",
             "References\nSmith (2020). Title. Journal.",
@@ -39,71 +47,174 @@ class TestReferencesDetection:
         assert detect_references_start_page(pages) == 3
 
     def test_finds_bibliography(self):
-        pages = self._pages([
+        pages = _pages([
             "Body text.",
             "Bibliography\nSome ref.",
         ])
         assert detect_references_start_page(pages) == 2
 
     def test_no_references(self):
-        pages = self._pages(["Some text.", "More text."])
+        pages = _pages(["Some text.", "More text."])
         assert detect_references_start_page(pages) is None
 
     def test_case_insensitive(self):
-        pages = self._pages(["Body.", "REFERENCES\nRef list."])
+        pages = _pages(["Body.", "REFERENCES\nRef list."])
         assert detect_references_start_page(pages) == 2
 
     def test_works_cited(self):
-        pages = self._pages(["Body.", "Works Cited\nRef list."])
+        pages = _pages(["Body.", "Works Cited\nRef list."])
         assert detect_references_start_page(pages) == 2
 
     def test_references_early_in_doc_ignored(self):
-        """References heading in the front of the document is ignored (false positive guard)."""
-        pages = self._pages([
+        """References heading in the front of the document is ignored."""
+        pages = _pages([
             "References\nEarly refs.",
             "Body content here.",
             "More body.",
         ])
-        # Page 1 is in the front 60% → not searched → returns None
         assert detect_references_start_page(pages) is None
 
 
-# ── Prescriptive cue detection ────────────────────────────────────────────
+# ── DocumentContent ───────────────────────────────────────────────────────
 
-class TestPrescriptiveCue:
-    def test_should(self):
-        assert _has_prescriptive_cue("Governments should implement new policies.")
+class TestDocumentContent:
+    def test_full_text_with_markers(self):
+        pages = _pages(["Page one content.", "Page two content."])
+        dc = DocumentContent(pages)
+        text = dc.full_text_with_markers()
+        assert "[Page 1]" in text
+        assert "[Page 2]" in text
+        assert "Page one content." in text
 
-    def test_must(self):
-        assert _has_prescriptive_cue("Member states must comply with regulations.")
+    def test_total_chars(self):
+        pages = _pages(["Hello", "World"])
+        dc = DocumentContent(pages)
+        assert dc.total_chars == 10
 
-    def test_recommend(self):
-        assert _has_prescriptive_cue("We recommend strengthening institutions.")
+    def test_refs_excluded(self):
+        pages = _pages(["Body text.", "References\nSmith 2020."])
+        dc = DocumentContent(pages, refs_start_page=2)
+        assert len(dc.pages) == 1
+        assert dc.pages[0].page_num == 1
 
-    def test_no_cue(self):
-        assert not _has_prescriptive_cue("Forests cover 30% of the land area.")
+    def test_single_chunk_for_small_doc(self):
+        pages = _pages(["Short doc content."])
+        dc = DocumentContent(pages)
+        chunks = dc.page_chunks(max_chars=5000)
+        assert len(chunks) == 1
 
-    def test_suggest(self):
-        assert _has_prescriptive_cue("The findings suggest a new approach.")
+    def test_multiple_chunks_for_large_doc(self):
+        # Create pages that exceed max_chars
+        big_text = "x" * 5000
+        pages = _pages([big_text] * 10)  # 50k total chars
+        dc = DocumentContent(pages)
+        chunks = dc.page_chunks(max_chars=15000)
+        assert len(chunks) >= 2
+
+    def test_empty_pages(self):
+        dc = DocumentContent([])
+        assert dc.total_chars == 0
+        assert dc.page_chunks() == []
+
+    def test_chunk_overlap(self):
+        """Chunks should have overlapping pages."""
+        pages = _pages(["x" * 4000] * 10)
+        dc = DocumentContent(pages)
+        chunks = dc.page_chunks(max_chars=12000, overlap_pages=2)
+        if len(chunks) >= 2:
+            # Get page numbers from each chunk
+            chunk1_pages = {p.page_num for p, _ in [(p, None) for p in chunks[0][0]]}
+            chunk2_pages = {p.page_num for p, _ in [(p, None) for p in chunks[1][0]]}
+            overlap = chunk1_pages & chunk2_pages
+            assert len(overlap) >= 1  # At least some overlap
 
 
-# ── Citation rejection ────────────────────────────────────────────────────
+# ── Evidence verification ─────────────────────────────────────────────────
 
-class TestCitationRejection:
-    def test_clean_sentence(self):
-        assert not _is_citation_heavy("Governments should implement new policies.")
+class TestEvidenceVerification:
+    def test_exact_match(self):
+        assert verify_evidence(
+            "Governments should strengthen monitoring",
+            "Governments should strengthen monitoring systems."
+        )
 
-    def test_citation_heavy(self):
-        sent = "(Smith 2020) (Jones et al. 2019) (Brown & White 2021) states that forests"
-        assert _is_citation_heavy(sent)
+    def test_whitespace_normalized(self):
+        assert verify_evidence(
+            "Governments  should   strengthen",
+            "Governments should strengthen monitoring."
+        )
 
-    def test_single_citation_ok(self):
-        sent = "Policy should change (Smith 2020) to address the growing crisis."
-        assert not _is_citation_heavy(sent)
+    def test_case_insensitive(self):
+        assert verify_evidence(
+            "GOVERNMENTS should STRENGTHEN",
+            "governments should strengthen monitoring."
+        )
 
-    def test_numbered_citations_heavy(self):
-        sent = "[1] [2] [3] [4] [5] [6] [7] [8] review of literature"
-        assert _is_citation_heavy(sent)
+    def test_prefix_fallback(self):
+        assert verify_evidence(
+            "Governments should strengthen monitoring and improve transparency in forest governance",
+            "Governments should strengthen monitoring systems."
+        )
+
+    def test_no_match(self):
+        assert not verify_evidence(
+            "A completely unrelated quote from a different document",
+            "Forests cover 30% of the land area."
+        )
+
+    def test_short_quote_rejected(self):
+        assert not verify_evidence("short", "short text here.")
+
+
+# ── Deduplication ─────────────────────────────────────────────────────────
+
+class TestDeduplication:
+    def _make_extraction(self, text, page=1, rec_id="r1"):
+        return PolicyExtraction(
+            rec_id=rec_id,
+            extraction_type=ExtractionType.TRADE_OFF,
+            confidence=0.8,
+            source_text_raw=text,
+            page=page,
+            evidence=[],
+        )
+
+    def test_exact_duplicates_removed(self):
+        items = [
+            self._make_extraction("Governments should strengthen monitoring systems"),
+            self._make_extraction("Governments should strengthen monitoring systems"),
+        ]
+        result = _deduplicate_extractions(items)
+        assert len(result) == 1
+
+    def test_substring_containment(self):
+        items = [
+            self._make_extraction("Governments should strengthen monitoring systems for all forests"),
+            self._make_extraction("Governments should strengthen monitoring systems"),
+        ]
+        result = _deduplicate_extractions(items)
+        assert len(result) == 1
+
+    def test_distinct_kept(self):
+        items = [
+            self._make_extraction("Governments should strengthen monitoring"),
+            self._make_extraction("Companies must reduce emissions significantly"),
+        ]
+        result = _deduplicate_extractions(items)
+        assert len(result) == 2
+
+    def test_empty_list(self):
+        assert _deduplicate_extractions([]) == []
+
+    def test_prefix_match_same_page(self):
+        # Long quotes with same 60-char prefix on adjacent pages → dedup
+        base = "Governments should strengthen forest monitoring systems and " + "x" * 50
+        items = [
+            self._make_extraction(base + " part one", page=1),
+            self._make_extraction(base + " part two", page=1),
+        ]
+        result = _deduplicate_extractions(items)
+        assert len(result) == 1
 
 
 # ── Normalisation helpers ─────────────────────────────────────────────────
@@ -146,51 +257,176 @@ class TestNormalization:
         assert _normalize_instrument("xyzzy") == InstrumentType.OTHER
 
 
-# ── Candidate generation (without LLM) ───────────────────────────────────
+# ── Extractor with mock LLM ─────────────────────────────────────────────
 
-class TestCandidateGeneration:
-    def setup_method(self):
-        # Create extractor with a mock LLM client
-        class FakeLLM:
-            pass
-        self.extractor = RecommendationExtractor(
-            llm_client=FakeLLM(),
-            config={"min_confidence": 0.6, "batch_size": 10},
-        )
+class FakeLLMEmpty:
+    """Mock LLM that returns no recommendations."""
+    def structured_completion(self, messages, response_model):
+        return RecommendationExtractionResponse(items=[])
 
-    def _pages(self, texts):
-        return [
-            PageText(page_num=i + 1, text=t, char_count=len(t), word_count=len(t.split()))
-            for i, t in enumerate(texts)
-        ]
 
-    def test_prescriptive_kept(self):
-        pages = self._pages(["Governments should implement comprehensive monitoring systems for forests. This is a fact."])
-        candidates = self.extractor._generate_candidates(pages)
-        assert len(candidates) >= 1
-        assert any("should" in c["text"] for c in candidates)
+class FakeLLMWithRecs:
+    """Mock LLM that returns a recommendation using text from the document."""
+    def __init__(self, quote="Governments should strengthen forest monitoring systems"):
+        self.quote = quote
 
-    def test_citation_heavy_rejected(self):
-        pages = self._pages([
-            "(Smith 2020) (Jones 2019) (Brown 2021) (White 2022) should regulate forests."
+    def structured_completion(self, messages, response_model):
+        return RecommendationExtractionResponse(items=[
+            RecommendationItem(
+                extraction_type=ExtractionType.RECOMMENDATION,
+                confidence=0.85,
+                source_quote=self.quote,
+                page=1,
+                actor_text_raw="Governments",
+                action_text_raw="strengthen forest monitoring systems",
+                strength="should",
+            ),
         ])
-        candidates = self.extractor._generate_candidates(pages)
-        # Should be rejected due to high citation density
-        assert len(candidates) == 0
 
-    def test_short_sentences_skipped(self):
-        pages = self._pages(["We should. Yes."])
-        candidates = self.extractor._generate_candidates(pages)
-        assert len(candidates) == 0
 
-    def test_references_pages_excluded_in_full_pipeline(self):
-        """Test that extract_recommendations excludes references pages."""
-        pages = self._pages([
+class TestRecommendationExtractor:
+    def test_empty_document(self):
+        extractor = RecommendationExtractor(
+            llm_client=FakeLLMEmpty(), config={"min_confidence": 0.6},
+        )
+        result = extractor.extract_recommendations([], "test_doc")
+        assert result == []
+
+    def test_extracts_with_valid_evidence(self):
+        quote = "Governments should strengthen forest monitoring systems"
+        pages = _pages([f"{quote} for all tropical regions."])
+        extractor = RecommendationExtractor(
+            llm_client=FakeLLMWithRecs(quote=quote),
+            config={"min_confidence": 0.6},
+        )
+        result = extractor.extract_recommendations(pages, "test_doc")
+        assert len(result) >= 1
+        assert result[0].extraction_type == ExtractionType.RECOMMENDATION
+        assert result[0].actor_type_normalized == ActorType.GOVERNMENT
+        assert result[0].strength == RecommendationStrength.SHOULD
+
+    def test_evidence_not_in_text_rejected(self):
+        """Recommendations with quotes not found in the document are filtered out."""
+        pages = _pages(["Forests cover 30% of the total land area globally."])
+        extractor = RecommendationExtractor(
+            llm_client=FakeLLMWithRecs(
+                quote="A completely different quote not in the document"
+            ),
+            config={"min_confidence": 0.6},
+        )
+        result = extractor.extract_recommendations(pages, "test_doc")
+        assert len(result) == 0
+
+    def test_low_confidence_filtered(self):
+        """Recommendations below min_confidence are filtered out."""
+        class LowConfLLM:
+            def structured_completion(self, messages, response_model):
+                return RecommendationExtractionResponse(items=[
+                    RecommendationItem(
+                        extraction_type=ExtractionType.RECOMMENDATION,
+                        confidence=0.3,
+                        source_quote="Governments should strengthen forest monitoring",
+                        page=1,
+                    ),
+                ])
+
+        pages = _pages(["Governments should strengthen forest monitoring systems."])
+        extractor = RecommendationExtractor(
+            llm_client=LowConfLLM(),
+            config={"min_confidence": 0.6},
+        )
+        result = extractor.extract_recommendations(pages, "test_doc")
+        assert len(result) == 0
+
+    def test_policy_option_true_positive(self):
+        """A genuine policy option with verified evidence is extracted."""
+        option_text = "Option A proposes a carbon tax while Option B proposes cap-and-trade"
+
+        class PolicyOptionLLM:
+            def structured_completion(self, messages, response_model):
+                return RecommendationExtractionResponse(items=[
+                    RecommendationItem(
+                        extraction_type=ExtractionType.POLICY_OPTION,
+                        confidence=0.8,
+                        source_quote=option_text,
+                        page=1,
+                        action_text_raw="carbon tax or cap-and-trade",
+                    ),
+                ])
+
+        pages = _pages([f"The brief considers two pathways: {option_text} for emission reduction."])
+        extractor = RecommendationExtractor(
+            llm_client=PolicyOptionLLM(), config={"min_confidence": 0.6},
+        )
+        result = extractor.extract_recommendations(pages, "test_doc")
+        assert len(result) == 1
+        assert result[0].extraction_type == ExtractionType.POLICY_OPTION
+
+    def test_policy_option_false_positive_excluded(self):
+        """A literature summary should NOT be extracted as a policy option."""
+        lit_quote = "Smith (2020) recommended increasing protected areas"
+
+        class FalsePositiveLLM:
+            def structured_completion(self, messages, response_model):
+                return RecommendationExtractionResponse(items=[
+                    RecommendationItem(
+                        extraction_type=ExtractionType.POLICY_OPTION,
+                        confidence=0.45,  # below threshold
+                        source_quote=lit_quote,
+                        page=1,
+                    ),
+                ])
+
+        pages = _pages([f"In the literature, {lit_quote} as part of a review."])
+        extractor = RecommendationExtractor(
+            llm_client=FalsePositiveLLM(), config={"min_confidence": 0.6},
+        )
+        result = extractor.extract_recommendations(pages, "test_doc")
+        assert len(result) == 0  # filtered by confidence threshold
+
+    def test_non_recommendation_type_skipped(self):
+        """ExtractionType.NON_RECOMMENDATION items are skipped."""
+        class NonRecLLM:
+            def structured_completion(self, messages, response_model):
+                return RecommendationExtractionResponse(items=[
+                    RecommendationItem(
+                        extraction_type=ExtractionType.NON_RECOMMENDATION,
+                        confidence=0.9,
+                        source_quote="This is just background information about forests",
+                        page=1,
+                    ),
+                ])
+
+        pages = _pages(["This is just background information about forests and ecosystems."])
+        extractor = RecommendationExtractor(
+            llm_client=NonRecLLM(),
+            config={"min_confidence": 0.6},
+        )
+        result = extractor.extract_recommendations(pages, "test_doc")
+        assert len(result) == 0
+
+    def test_references_pages_excluded(self):
+        """Pages after references heading are not sent to LLM."""
+        pages = _pages([
             "Governments should strengthen forest monitoring systems urgently.",
-            "References\nSmith (2020). Title. Journal. DOI. Governments should act.",
+            "More policy content here for the analysis pipeline.",
+            "More policy content here for the analysis pipeline.",
+            "More policy content here for the analysis pipeline.",
+            "References\nSmith (2020). Title. Journal. Governments should act.",
         ])
         refs_start = detect_references_start_page(pages)
-        assert refs_start == 2
-        eligible = [p for p in pages if p.page_num < refs_start]
-        assert len(eligible) == 1
-        assert eligible[0].page_num == 1
+        assert refs_start == 5
+        dc = DocumentContent(pages, refs_start)
+        assert all(p.page_num < 5 for p in dc.pages)
+
+    def test_rec_ids_renumbered(self):
+        """After dedup, rec_ids should be sequential."""
+        quote = "Governments should strengthen forest monitoring systems"
+        pages = _pages([f"{quote} for all regions across the globe."])
+        extractor = RecommendationExtractor(
+            llm_client=FakeLLMWithRecs(quote=quote),
+            config={"min_confidence": 0.6},
+        )
+        result = extractor.extract_recommendations(pages, "doc1")
+        if result:
+            assert result[0].rec_id == "doc1_rec_001"

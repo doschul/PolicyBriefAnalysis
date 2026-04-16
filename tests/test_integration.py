@@ -132,6 +132,50 @@ class TestMetricsCalculator:
         # textstat should return values for English text
         assert m.flesch_kincaid_grade is not None or m.flesch_reading_ease is not None
 
+    def test_passive_voice_share_computed(self):
+        """passive_voice_share is populated as a float."""
+        text = (
+            "The report was written by the team. "
+            "Forests are being destroyed at alarming rates. "
+            "The government announced new policies."
+        )
+        pages = self._pages([text])
+        m = self.calc.calculate_metrics(pages)
+        assert m.passive_voice_share is not None
+        assert 0.0 <= m.passive_voice_share <= 1.0
+
+    def test_passive_voice_high_share(self):
+        """Mostly passive text should have a high share."""
+        text = (
+            "The policy was implemented by the government. "
+            "The forest was destroyed by logging companies. "
+            "The report was written by researchers. "
+            "New measures were adopted by the parliament."
+        )
+        pages = self._pages([text])
+        m = self.calc.calculate_metrics(pages)
+        assert m.passive_voice_share is not None
+        assert m.passive_voice_share >= 0.5
+
+    def test_passive_voice_low_share(self):
+        """Mostly active text should have a low share."""
+        text = (
+            "The government implemented the policy. "
+            "Logging companies destroyed the forest. "
+            "Researchers wrote the report. "
+            "Parliament adopted new measures."
+        )
+        pages = self._pages([text])
+        m = self.calc.calculate_metrics(pages)
+        assert m.passive_voice_share is not None
+        assert m.passive_voice_share <= 0.5
+
+    def test_passive_voice_empty(self):
+        """Empty text returns None for passive_voice_share."""
+        pages = self._pages([""])
+        m = self.calc.calculate_metrics(pages)
+        assert m.passive_voice_share is None
+
 
 # ── Utility functions ─────────────────────────────────────────────────────
 

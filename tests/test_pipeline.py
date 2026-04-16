@@ -182,6 +182,25 @@ class TestOutputFiles:
         assert df.iloc[0]["doc_id"] == "test_doc"
         assert df.iloc[0]["fm_title"] == "Test Brief"
 
+    def test_funding_statement_exported(self, pipeline):
+        """Funding statement presence and raw text are exported to documents CSV."""
+        import pandas as pd
+        result = self._make_result()
+        result.front_matter.funding_statements = ["Funded by the EU Horizon programme"]
+        pipeline._generate_output_files([result])
+        df = pd.read_csv(pipeline.output_dir / "documents.csv")
+        assert df.iloc[0]["funding_statement_present"] is True or df.iloc[0]["funding_statement_present"] == True
+        assert "EU Horizon" in str(df.iloc[0]["funding_statements_raw"])
+
+    def test_funding_statement_absent(self, pipeline):
+        """Empty funding statements are correctly marked as absent."""
+        import pandas as pd
+        result = self._make_result()
+        result.front_matter.funding_statements = []
+        pipeline._generate_output_files([result])
+        df = pd.read_csv(pipeline.output_dir / "documents.csv")
+        assert df.iloc[0]["funding_statement_present"] is False or df.iloc[0]["funding_statement_present"] == False
+
     def test_structural_core_csv_content(self, pipeline):
         import pandas as pd
         results = [self._make_result()]
@@ -190,6 +209,21 @@ class TestOutputFiles:
         assert len(df) == 1
         assert df.iloc[0]["problem_status"] == "present"
         assert df.iloc[0]["solutions_count"] == 2
+
+    def test_structural_core_new_fields(self, pipeline):
+        """New heading-labelled and procedural clarity fields are exported."""
+        import pandas as pd
+        result = self._make_result()
+        result.structural_core.problem_explicitly_labelled = True
+        result.structural_core.solutions_explicitly_labelled = True
+        result.structural_core.implementation_explicitly_labelled = False
+        result.structural_core.procedural_clarity_status = "weak"
+        pipeline._generate_output_files([result])
+        df = pd.read_csv(pipeline.output_dir / "structural_core.csv")
+        assert df.iloc[0]["problem_explicitly_labelled"] == True
+        assert df.iloc[0]["solutions_explicitly_labelled"] == True
+        assert df.iloc[0]["implementation_explicitly_labelled"] == False
+        assert df.iloc[0]["procedural_clarity_status"] == "weak"
 
 
 # ── Sparse / scanned document handling ───────────────────────────────────

@@ -1,8 +1,10 @@
 """
-Policy Brief Analysis Pipeline — LLM-first orchestrator.
+Policy Brief Analysis Pipeline — broad-content, multi-pass LLM orchestrator.
 
-Front-matter and structural-core extraction are handled by inline LLM calls.
-Frame detection and recommendation extraction delegate to their modules.
+All semantic extraction (front-matter, structural core, frames,
+recommendations) is handled by broad-content LLM passes. Deterministic
+rails: PDF extraction, metrics, reference detection, evidence verification,
+normalization, output generation.
 """
 
 import json
@@ -31,7 +33,7 @@ from .models import (
     StructuralCoreResult,
 )
 from .pdf_extractor import PDFExtractor
-from .recommendation_extractor import RecommendationExtractor
+from .recommendation_extractor import DocumentContent, RecommendationExtractor
 from .utils import (
     clean_text_for_csv,
     create_document_id,
@@ -45,9 +47,9 @@ from .utils import (
 logger = logging.getLogger(__name__)
 
 
-# ── LLM prompts for pipeline-level extraction ────────────────────────────
+# ── LLM prompts ──────────────────────────────────────────────────────────
 
-_FRONT_MATTER_PROMPT = """Extract front-matter metadata from this document text.
+FRONT_MATTER_PROMPT = """Extract front-matter metadata from this policy document.
 
 Return JSON with exactly these fields:
 - title: the document title (null if not found)
@@ -58,25 +60,55 @@ Return JSON with exactly these fields:
 - funding_statements: list of funding acknowledgements (empty list if none)
 - linked_studies: list of referenced study names/IDs (empty list if none)
 
-Be conservative: only extract information explicitly stated in the text.
-Do not infer or guess. If unsure, leave as null or empty list."""
+Rules:
+- Extract information from the actual document text, not from PDF metadata.
+- Only extract information explicitly stated in the text.
+- Do not infer or guess. If unsure, leave as null or empty list.
+- The title should be the document's main title, not a section heading.
+- Authors should be individual person names, not organizations.
+- Search primarily in likely front-matter and end-matter locations such as title page, author blocks, acknowledgements, "about", "imprint", "contact", or closing sections, but use the full provided text if needed.
+- funding_statements should include only explicit acknowledgements of funding, sponsorship, grants, or supporting institutions. Do NOT include general mentions of organizations unless they are clearly stated as funders.
+- linked_studies should include only explicit references to a fuller underlying study, companion report, working paper, journal article, or technical report that this document points to for more detail.
+- Do NOT include ordinary bibliography entries, generic citations, or literature references as linked_studies.
+- Emails and URLs must be explicitly present in the text; do not construct or infer them."""
 
-_STRUCTURAL_CORE_PROMPT = """Analyze the structural components of this policy document.
+STRUCTURAL_CORE_PROMPT = """Analyze the structural components of this policy document.
 
 Assess whether the document contains:
+
 1. **Problem identification**: Does the document explicitly identify and frame a policy problem?
-   - "present": clear, explicit problem framing with evidence
+   - "present": clear, explicit problem framing with evidence or description
    - "weak": problem is implied but not explicitly stated
    - "absent": no problem identification
-2. **Solutions**: How many distinct policy solutions are proposed?
+   - A problem is "present" only if the document clearly describes a real-world issue, challenge, or policy-relevant situation that requires intervention. General background context or topic description alone is not sufficient.
+
+2. **Solutions**: How many distinct policy solutions or options are proposed?
    - Count only concrete, actionable solutions (not vague aspirations)
+   - A solution must represent a distinct course of action, intervention, or policy approach proposed by the document itself. Do NOT count repeated mentions of the same idea.
    - Are solutions explicitly linked to the identified problem?
+   - Solutions should ideally address the identified problem. If solutions are presented but not clearly connected to a problem, treat them as weaker.
+
 3. **Implementation considerations**: Does the document discuss how to implement its proposals?
    - "present": concrete implementation steps, timelines, or actors
    - "weak": brief mention without detail
    - "absent": no implementation discussion
+   - Implementation considerations include any discussion of how policies would be carried out in practice, such as: who is responsible (actors or institutions), how actions would be executed (procedures or steps), when actions occur (timelines or sequencing), feasibility, barriers, facilitators, or required resources, monitoring, enforcement, or evaluation.
+
 4. **Narrative hook**: Does the document use a compelling opening device?
-   - Examples: case study, statistic, anecdote, provocative question
+   - Examples: case study, statistic, anecdote, provocative question, vivid example
+   - A narrative hook should function as an engaging entry point (e.g. concrete example, striking statistic, or vivid scenario), not just general introductory text.
+
+5. **Explicit heading labels**: For each of the following structural components, assess whether they are clearly labelled with a section heading or subheading in the document. A component is "explicitly labelled" only if there is a visible heading (e.g. "The Problem", "Challenges", "Recommendations", "Policy Options", "Implementation", "Next Steps") that clearly signals the section's purpose. Implicit structure without labelled headings does not count.
+   - problem_explicitly_labelled: Is the problem/background/motivation section labelled with a heading?
+   - solutions_explicitly_labelled: Are solutions or recommendations labelled with a heading?
+   - implementation_explicitly_labelled: Are implementation considerations labelled with a heading?
+
+6. **Procedural clarity**: Does the document provide concrete guidance on HOW actions should be carried out?
+   - "present": the document specifies named steps, procedures, sequencing, timelines, operational instructions, or clearly describes who does what and how
+   - "weak": some procedural language exists but is vague, incomplete, or only aspirational
+   - "absent": the document recommends actions but provides no concrete guidance on execution
+   - Procedural clarity is distinct from merely mentioning implementation. A document can mention implementation considerations (e.g. "implementation will require resources") without providing concrete procedural guidance.
+   - General aspirations like "governments should act" do NOT count as procedural clarity.
 
 Return JSON with:
 - problem_status: "present"/"absent"/"weak"
@@ -87,8 +119,15 @@ Return JSON with:
 - implementation_count: number of implementation considerations
 - narrative_hook_present: boolean
 - narrative_hook_type: type of hook used (null if none)
+- problem_explicitly_labelled: boolean
+- solutions_explicitly_labelled: boolean
+- implementation_explicitly_labelled: boolean
+- procedural_clarity_status: "present"/"absent"/"weak"
 
-Be conservative. Only mark as "present" when evidence is clear."""
+Be conservative. Only mark as "present" when evidence is clear.
+Look at the document broadly and consider how elements function in the document, not just whether certain words appear.
+Do NOT rely on section headings alone for problem_status, solutions, or implementation_status; a document may have implicit structure without labeled sections.
+Do NOT treat general aspirations, high-level goals, or problem descriptions as solutions."""
 
 
 class PolicyBriefPipeline:
@@ -167,6 +206,7 @@ class PolicyBriefPipeline:
                 context_window=frames_cfg.get("context_window", 500),
                 min_evidence_quotes=frames_cfg.get("min_evidence_quotes", 1),
                 max_evidence_quotes=frames_cfg.get("max_evidence_quotes", 3),
+                max_chars_per_chunk=frames_cfg.get("max_chars_per_chunk", 100000),
             )
         return self._frame_detector
 
@@ -322,20 +362,19 @@ class PolicyBriefPipeline:
     # ── LLM-based front-matter extraction ─────────────────────────────
 
     def _extract_front_matter(self, pages: List[PageText]) -> DocumentFrontMatter:
-        """Extract front matter from first few + last page via LLM."""
-        # Use first 3 pages and last page
-        sample_pages = pages[:3]
+        """Extract front matter from broad document content via LLM."""
+        # Use first 3 pages and last page (covers most formats)
+        sample_pages = list(pages[:3])
         if len(pages) > 3:
             sample_pages.append(pages[-1])
-        text = "\n\n---PAGE BREAK---\n\n".join(
-            f"[Page {p.page_num}]\n{p.text}" for p in sample_pages
-        )
+        content = DocumentContent(sample_pages)
+        text = content.full_text_with_markers()
         # Truncate to avoid token limits
         if len(text) > 8000:
             text = text[:8000]
 
         messages = [
-            {"role": "system", "content": _FRONT_MATTER_PROMPT},
+            {"role": "system", "content": FRONT_MATTER_PROMPT},
             {"role": "user", "content": text},
         ]
         return self.llm_client.structured_completion(messages, DocumentFrontMatter)
@@ -343,25 +382,28 @@ class PolicyBriefPipeline:
     # ── LLM-based structural core extraction ──────────────────────────
 
     def _extract_structural_core(self, pages: List[PageText]) -> StructuralCoreResult:
-        """Analyse structural core via broad document sampling + LLM."""
-        # Sample: first 5 pages, middle pages, last 3 pages
-        n = len(pages)
-        indices = set(range(min(5, n)))
-        if n > 10:
-            mid = n // 2
-            indices.update(range(max(0, mid - 1), min(n, mid + 2)))
-        if n > 5:
-            indices.update(range(max(0, n - 3), n))
-        sample = [pages[i] for i in sorted(indices)]
-
-        text = "\n\n---PAGE BREAK---\n\n".join(
-            f"[Page {p.page_num}]\n{p.text}" for p in sample
-        )
-        if len(text) > 10000:
-            text = text[:10000]
+        """Analyse structural core via broad document content + LLM."""
+        content = DocumentContent(pages)
+        # For short docs, send everything; for longer, sample broadly
+        if content.total_chars <= 12000:
+            text = content.full_text_with_markers()
+        else:
+            # Sample: first 5 pages, middle pages, last 3 pages
+            n = len(pages)
+            indices = set(range(min(5, n)))
+            if n > 10:
+                mid = n // 2
+                indices.update(range(max(0, mid - 1), min(n, mid + 2)))
+            if n > 5:
+                indices.update(range(max(0, n - 3), n))
+            sample = [pages[i] for i in sorted(indices)]
+            sample_content = DocumentContent(sample)
+            text = sample_content.full_text_with_markers()
+        if len(text) > 15000:
+            text = text[:15000]
 
         messages = [
-            {"role": "system", "content": _STRUCTURAL_CORE_PROMPT},
+            {"role": "system", "content": STRUCTURAL_CORE_PROMPT},
             {"role": "user", "content": text},
         ]
         return self.llm_client.structured_completion(messages, StructuralCoreResult)
@@ -389,6 +431,11 @@ class PolicyBriefPipeline:
                 row["fm_affiliations"] = "; ".join(r.front_matter.affiliations)
                 row["fm_emails"] = "; ".join(r.front_matter.emails)
                 row["fm_urls"] = "; ".join(r.front_matter.urls)
+                row["funding_statement_present"] = len(r.front_matter.funding_statements) > 0
+                row["funding_statements_raw"] = "; ".join(r.front_matter.funding_statements) if r.front_matter.funding_statements else None
+            else:
+                row["funding_statement_present"] = None
+                row["funding_statements_raw"] = None
             # Metrics
             for k, v in r.metrics.model_dump().items():
                 row[k] = v

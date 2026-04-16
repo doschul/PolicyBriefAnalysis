@@ -135,6 +135,10 @@ class DocumentMetrics(BaseModel):
     flesch_reading_ease: Optional[float] = None
     url_count: int = 0
     email_count: int = 0
+    passive_voice_share: Optional[float] = Field(
+        default=None,
+        description="Heuristic share of sentences with passive voice constructions (0.0-1.0)",
+    )
 
 
 class DocumentFrontMatter(BaseModel):
@@ -168,20 +172,20 @@ class FrameAssessment(BaseModel):
         return self
 
 
-class FrameDetectionInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    frame_id: str
-    frame_definition: str
-    text_spans: List[Dict[str, Any]]
-
-
-class FrameDetectionOutput(BaseModel):
+class SingleFrameResult(BaseModel):
+    """LLM output for one frame within a broad-content frame extraction."""
     model_config = ConfigDict(extra="forbid")
     frame_id: str
     decision: FrameDecision
     confidence: float = Field(ge=0.0, le=1.0)
-    evidence: List[Evidence]
+    evidence: List[Evidence] = Field(default_factory=list)
     rationale: str
+
+
+class FrameExtractionResponse(BaseModel):
+    """LLM response containing assessments for all frames in one call."""
+    model_config = ConfigDict(extra="forbid")
+    frames: List[SingleFrameResult]
 
 
 # ── Structural core (LLM-extracted) ──────────────────────────────────────
@@ -197,9 +201,51 @@ class StructuralCoreResult(BaseModel):
     implementation_count: int = 0
     narrative_hook_present: bool = False
     narrative_hook_type: Optional[str] = None
+    problem_explicitly_labelled: bool = Field(
+        default=False,
+        description="Whether the problem section is clearly labelled with a heading",
+    )
+    solutions_explicitly_labelled: bool = Field(
+        default=False,
+        description="Whether solutions/recommendations are clearly labelled with a heading",
+    )
+    implementation_explicitly_labelled: bool = Field(
+        default=False,
+        description="Whether implementation considerations are clearly labelled with a heading",
+    )
+    procedural_clarity_status: str = Field(
+        default="absent",
+        description="present/weak/absent — whether the document provides concrete procedural guidance on how actions should be carried out",
+    )
 
 
 # ── Recommendation extraction models ─────────────────────────────────────
+
+class RecommendationItem(BaseModel):
+    """Single recommendation/extraction returned by the LLM from broad content."""
+    model_config = ConfigDict(extra="forbid")
+    extraction_type: ExtractionType
+    confidence: float = Field(ge=0.0, le=1.0)
+    source_quote: str = Field(description="Verbatim quote from the document text")
+    page: int = Field(description="Page number where the quote appears")
+    actor_text_raw: Optional[str] = None
+    action_text_raw: Optional[str] = None
+    target_text_raw: Optional[str] = None
+    instrument_type: Optional[str] = None
+    strength: Optional[str] = None
+    geographic_scope: Optional[str] = None
+    timeframe: Optional[str] = None
+    policy_domain: Optional[str] = None
+    expected_outcomes: List[str] = Field(default_factory=list)
+    implementation_steps: List[str] = Field(default_factory=list)
+    trade_offs: List[str] = Field(default_factory=list)
+
+
+class RecommendationExtractionResponse(BaseModel):
+    """LLM response for broad-content recommendation extraction."""
+    model_config = ConfigDict(extra="forbid")
+    items: List[RecommendationItem] = Field(default_factory=list)
+
 
 class PolicyExtraction(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -233,26 +279,6 @@ class PolicyExtraction(BaseModel):
                 "At least one evidence quote is required for recommendations and options"
             )
         return self
-
-
-class CandidateClassification(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    extraction_type: ExtractionType
-    confidence: float = Field(ge=0.0, le=1.0)
-    actor_text_raw: Optional[str] = None
-    action_text_raw: Optional[str] = None
-    target_text_raw: Optional[str] = None
-    instrument_type: Optional[str] = None
-    strength: Optional[str] = None
-    expected_outcomes: List[str] = Field(default_factory=list)
-    implementation_steps: List[str] = Field(default_factory=list)
-    trade_offs: List[str] = Field(default_factory=list)
-    rejection_reason: Optional[str] = None
-
-
-class CandidateClassificationBatch(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    classifications: List[CandidateClassification]
 
 
 # ── Processing and output models ─────────────────────────────────────────
