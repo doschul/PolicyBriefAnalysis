@@ -59,6 +59,8 @@ Return JSON with exactly these fields:
 - urls: list of URLs found (empty list if none)
 - funding_statements: list of funding acknowledgements (empty list if none)
 - linked_studies: list of referenced study names/IDs (empty list if none)
+- affiliation_type: list of category labels for each affiliation, aligned position-for-position with affiliations (empty list if none)
+- has_visual_elements: true if the text contains explicit references to figures, tables, charts, or photos; false otherwise
 
 Rules:
 - Extract information from the actual document text, not from PDF metadata.
@@ -70,7 +72,9 @@ Rules:
 - funding_statements should include only explicit acknowledgements of funding, sponsorship, grants, or supporting institutions. Do NOT include general mentions of organizations unless they are clearly stated as funders.
 - linked_studies should include only explicit references to a fuller underlying study, companion report, working paper, journal article, or technical report that this document points to for more detail.
 - Do NOT include ordinary bibliography entries, generic citations, or literature references as linked_studies.
-- Emails and URLs must be explicitly present in the text; do not construct or infer them."""
+- Emails and URLs must be explicitly present in the text; do not construct or infer them.
+- For each affiliation, classify it into exactly one of: Research Institute, University, Intergovernmental Organization, NGO, Private Company, Other. The affiliation_type list must be the same length as affiliations. Use "Other" when uncertain.
+- has_visual_elements must be based ONLY on explicit textual mentions such as "Figure", "Fig.", "Table", "Chart", "Graph", "Photo", or similar caption patterns. Do not infer from context."""
 
 STRUCTURAL_CORE_PROMPT = """Analyze the structural components of this policy document.
 
@@ -320,7 +324,7 @@ class PolicyBriefPipeline:
         if self.enable_recommendations and not likely_scanned:
             try:
                 policy_extractions = self.recommendation_extractor.extract_recommendations(
-                    pages, doc_id
+                    pages, doc_id, input_mode="document"
                 )
             except Exception as exc:
                 logger.warning(f"[{doc_id}] Recommendation extraction failed: {exc}")
@@ -433,9 +437,12 @@ class PolicyBriefPipeline:
                 row["fm_urls"] = "; ".join(r.front_matter.urls)
                 row["funding_statement_present"] = len(r.front_matter.funding_statements) > 0
                 row["funding_statements_raw"] = "; ".join(r.front_matter.funding_statements) if r.front_matter.funding_statements else None
+                row["fm_affiliation_types"] = "; ".join(r.front_matter.affiliation_type) if r.front_matter.affiliation_type else None
+                row["has_visual_elements"] = r.front_matter.has_visual_elements
             else:
                 row["funding_statement_present"] = None
                 row["funding_statements_raw"] = None
+                row["has_visual_elements"] = None
             # Metrics
             for k, v in r.metrics.model_dump().items():
                 row[k] = v

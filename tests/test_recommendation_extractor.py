@@ -430,3 +430,49 @@ class TestRecommendationExtractor:
         result = extractor.extract_recommendations(pages, "doc1")
         if result:
             assert result[0].rec_id == "doc1_rec_001"
+
+    def test_snippet_mode_single_chunk_no_references_detection(self):
+        """input_mode='snippet' skips reference detection and runs as single chunk."""
+        quote = "Governments should strengthen forest monitoring systems"
+        snippet_text = f"{quote} for all tropical regions in the mandate area."
+        pages = [
+            PageText(
+                page_num=1,
+                text=snippet_text,
+                char_count=len(snippet_text),
+                word_count=len(snippet_text.split()),
+            )
+        ]
+        extractor = RecommendationExtractor(
+            llm_client=FakeLLMWithRecs(quote=quote),
+            config={"min_confidence": 0.6},
+        )
+        result = extractor.extract_recommendations(pages, "test_doc", input_mode="snippet")
+        assert len(result) >= 1
+        assert result[0].rec_id.startswith("test_doc_snip_")
+
+    def test_snippet_mode_rec_id_prefix(self):
+        """Snippet-mode rec_ids use '_snip_' prefix."""
+        quote = "Governments should strengthen forest monitoring systems"
+        pages = _pages([f"{quote} for all tropical regions."])
+        extractor = RecommendationExtractor(
+            llm_client=FakeLLMWithRecs(quote=quote),
+            config={"min_confidence": 0.6},
+        )
+        result = extractor.extract_recommendations(pages, "doc42", input_mode="snippet")
+        if result:
+            assert "_snip_" in result[0].rec_id
+
+    def test_document_mode_uses_default(self):
+        """Default input_mode is 'document' (reference detection active)."""
+        quote = "Governments should strengthen forest monitoring systems"
+        pages = _pages([f"{quote} for all tropical regions."])
+        extractor = RecommendationExtractor(
+            llm_client=FakeLLMWithRecs(quote=quote),
+            config={"min_confidence": 0.6},
+        )
+        # Default call — should still work and use _rec_ prefix
+        result = extractor.extract_recommendations(pages, "doc1")
+        if result:
+            assert "_rec_" in result[0].rec_id
+

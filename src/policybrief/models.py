@@ -151,6 +151,23 @@ class DocumentFrontMatter(BaseModel):
     urls: List[str] = Field(default_factory=list)
     funding_statements: List[str] = Field(default_factory=list)
     linked_studies: List[str] = Field(default_factory=list)
+    affiliation_type: List[str] = Field(
+        default_factory=list,
+        description="Broad category for each affiliation, aligned position-for-position with affiliations",
+    )
+    has_visual_elements: Optional[bool] = Field(
+        default=None,
+        description="True if document text contains explicit references to figures, tables, charts, or photos",
+    )
+
+    @model_validator(mode="after")
+    def align_affiliation_type(self):
+        n = len(self.affiliations)
+        if len(self.affiliation_type) < n:
+            self.affiliation_type.extend(["Other"] * (n - len(self.affiliation_type)))
+        elif len(self.affiliation_type) > n:
+            self.affiliation_type = self.affiliation_type[:n]
+        return self
 
 
 # ── Frame detection models ────────────────────────────────────────────────

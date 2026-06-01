@@ -8,7 +8,7 @@ exclusion, evidence verification, normalization, deduplication.
 
 import logging
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from .llm_client import LLMClient
 from .models import (
@@ -213,7 +213,11 @@ RULES:
 - Confidence: 0.0-1.0. Use 0.8+ only for unambiguous, explicit recommendations.
 - If NO genuine recommendations exist in this text, return an empty items list.
 - Do NOT over-extract. Missing a borderline case is better than a false positive.
-- Do NOT extract from bibliographic references, footnotes, or endnotes."""
+- Do NOT extract from bibliographic references, footnotes, or endnotes.
+- Do NOT extract actor_responsibility unless the actor is explicitly named in the same sentence as the action.
+- Do NOT extract expected_outcome unless the outcome is explicitly stated as a result of a specific proposal in the text.
+- If a statement qualifies as a policy_option, it MUST NOT also be classified as a recommendation. policy_option takes precedence.
+- Always extract the FULL sentence containing the recommendation as source_quote. Do NOT truncate or extract partial phrases."""
 
 
 # ── Document content helper ──────────────────────────────────────────────
@@ -346,8 +350,31 @@ class RecommendationExtractor:
         self,
         pages: List[PageText],
         doc_id: str,
+        input_mode: Literal["document", "snippet"] = "document",
     ) -> List[PolicyExtraction]:
-        """Extract recommendations from document pages via broad-content LLM."""
+        """Extract recommendations from document pages or a single snippet.
+
+        Parameters
+        ----------
+        pages:
+            For ``input_mode="document"``: all pages from the PDF (reference
+            detection and chunking are applied as normal).
+            For ``input_mode="snippet"``: a single synthetic PageText wrapping
+            one pre-extracted solution sentence.  Reference detection and
+            chunking are skipped; full actor/instrument classification is
+            allowed.
+        doc_id:
+            Document identifier used for logging and rec_id prefixes.
+        input_mode:
+            ``"document"`` (default) — full-document pass with reference
+            exclusion, chunking, and actor/instrument suppression.
+            ``"snippet"`` — single-chunk pass on a pre-extracted solution
+            sentence; no suppression note injected.
+        """
+        if input_mode == "snippet":
+            return self._extract_snippet(pages, doc_id)
+
+        # ── document mode ────────────────────────────────────────────────
         # 1. Detect and exclude reference pages
         refs_start = detect_references_start_page(pages)
         if refs_start is not None:
@@ -370,7 +397,7 @@ class RecommendationExtractor:
 
         for chunk_idx, (chunk_pages, chunk_text) in enumerate(chunks):
             try:
-                raw_items = self._extract_from_chunk(chunk_text)
+                raw_items = self._extract_from_chunk(chunk_text, suppress_actor=True)
                 extractions = self._validate_and_build(
                     raw_items, full_text, doc_id, len(all_extractions)
                 )
@@ -392,14 +419,41 @@ class RecommendationExtractor:
 
         return deduped
 
-    def _extract_from_chunk(self, chunk_text: str) -> List[Any]:
+    def _extract_snippet(
+        self,
+        pages: List[PageText],
+        doc_id: str,
+    ) -> List[PolicyExtraction]:
+        """Single-chunk extraction for a pre-extracted solution snippet.
+
+        No reference detection, no chunking, and no actor/instrument
+        suppression — the snippet is short and provides the full context.
+        """
+        if not pages:
+            return []
+        full_text = "\n".join(p.text for p in pages)
+        try:
+            raw_items = self._extract_from_chunk(full_text, suppress_actor=False)
+        except Exception as exc:
+            logger.warning(f"[{doc_id}] Snippet extraction failed: {exc}")
+            return []
+
+        extractions = self._validate_and_build(raw_items, full_text, doc_id, 0)
+        for i, ext in enumerate(extractions, 1):
+            ext.rec_id = f"{doc_id}_snip_{i:03d}"
+        return extractions
+
+    def _extract_from_chunk(self, chunk_text: str, suppress_actor: bool = False) -> List[Any]:
         """Run the LLM on one chunk and return raw RecommendationItems."""
+        user_content = f"Extract policy recommendations from this document text:\n\n{chunk_text}"
+        if suppress_actor:
+            user_content += (
+                "\n\nIMPORTANT: Set actor_text_raw and instrument_type to null for all items "
+                "\u2014 these fields will be classified in a separate solution-level pass."
+            )
         messages = [
             {"role": "system", "content": RECOMMENDATION_PROMPT},
-            {
-                "role": "user",
-                "content": f"Extract policy recommendations from this document text:\n\n{chunk_text}",
-            },
+            {"role": "user", "content": user_content},
         ]
         result: RecommendationExtractionResponse = self.llm.structured_completion(
             messages, RecommendationExtractionResponse

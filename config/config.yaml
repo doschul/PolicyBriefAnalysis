@@ -111,6 +111,21 @@ validation:
   # Schema validation strictness
   strict_schema: true
 
+# Solution-level Analysis Settings
+# Used by SolutionAnalyzer (analyze-solutions CLI command).
+# Input: a CSV/Excel of pre-extracted solutions with a 'source_text' column.
+# Output: solutions_enriched.csv with instrument_type, actor_raw, actor_type,
+#         policy_domain, geographic_scope filled per solution.
+solution_analysis:
+  min_confidence: 0.6
+
+# Cross-Validation Settings
+# Used by CrossValidator (validate CLI command).
+# Aligned to the schema of 'data/Policy Briefs corpus.csv.xlsx'.
+cross_validation:
+  # Default path to manually coded corpus (relative to working directory)
+  manual_corpus: "data/Policy Briefs corpus.csv.xlsx"
+
 # Logging
 logging:
   level: "INFO"

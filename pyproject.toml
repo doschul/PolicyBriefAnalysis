@@ -26,6 +26,7 @@ dependencies = [
     "pypdf>=4.0.0",
     "pymupdf>=1.23.0",  # fitz for better PDF extraction
     "pandas>=2.0.0",
+    "openpyxl>=3.1.0",  # Required for reading/writing Excel files
     "pyarrow>=15.0.0",  # For parquet support
     "pyyaml>=6.0.0",
     "click>=8.1.0",

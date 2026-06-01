@@ -29,6 +29,8 @@ except ImportError:
                     os.environ[key] = value
 
 from src.policybrief.pipeline import PolicyBriefPipeline
+from src.policybrief.snippet_analysis import SnippetAnalyzer
+from src.policybrief.cross_validator import CrossValidator
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -206,6 +208,163 @@ def validate_config(config: Path) -> None:
 def version() -> None:
     """Show version information."""
     click.echo("Policy Brief Analysis Pipeline v0.1.0")
+
+
+@cli.command(name="run-snippet-analysis")
+@click.option(
+    "--source-file",
+    required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help=(
+        "For --input-source=ai: path to recommendations.csv. "
+        "For --input-source=manual: path to PBs solutions coded segments.xlsx"
+    ),
+)
+@click.option(
+    "--input-source",
+    type=click.Choice(["ai", "manual"], case_sensitive=False),
+    default="ai",
+    show_default=True,
+    help="Input source: 'ai' (recommendations.csv) or 'manual' (coded segments Excel)",
+)
+@click.option(
+    "--output-dir",
+    required=True,
+    type=click.Path(file_okay=False, dir_okay=True, path_type=Path),
+    help="Directory to write recommendations_snippet_ai.csv or recommendations_snippet_manual.csv",
+)
+@click.option(
+    "--config",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    help="Configuration directory (for OpenAI settings)",
+)
+@click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
+def run_snippet_analysis(
+    source_file: Path,
+    input_source: str,
+    output_dir: Path,
+    config: Path,
+    verbose: bool,
+) -> None:
+    """Re-run extraction on individual solution sentences.
+
+    Uses the same RECOMMENDATION_PROMPT as the document-level pipeline
+    (input_mode='snippet').  Supports two input sources:
+
+    \b
+    ai:     reads source_text_raw from recommendations.csv
+            → writes recommendations_snippet_ai.csv
+    manual: reads Segment column from PBs solutions coded segments.xlsx
+            → writes recommendations_snippet_manual.csv
+    """
+    setup_logging(verbose)
+    logger = logging.getLogger(__name__)
+
+    from src.policybrief.llm_client import LLMClient
+    from src.policybrief.utils import get_env_var, load_yaml_config
+
+    cfg = load_yaml_config(config / "config.yaml")
+    api_key = get_env_var("OPENAI_API_KEY", required=True)
+    oai_cfg = cfg.get("openai", {})
+    llm = LLMClient(
+        api_key=api_key,
+        model=oai_cfg.get("model", "gpt-4o-mini"),
+        temperature=oai_cfg.get("temperature", 0.1),
+        max_tokens=oai_cfg.get("max_tokens", 4000),
+        timeout=oai_cfg.get("timeout", 60),
+        max_retries=oai_cfg.get("max_retries", 5),
+        retry_delay=oai_cfg.get("retry_delay", 2.0),
+    )
+
+    analyzer = SnippetAnalyzer(llm_client=llm, config=cfg.get("recommendation_extraction", {}))
+    result_df = analyzer.analyze(
+        source_path=source_file,
+        output_dir=output_dir,
+        input_source=input_source,
+    )
+    out_name = (
+        "recommendations_snippet_ai.csv"
+        if input_source == "ai"
+        else "recommendations_snippet_manual.csv"
+    )
+    logger.info(f"Done. {len(result_df)} snippet extractions written to {output_dir / out_name}")
+
+
+@cli.command()
+@click.option(
+    "--ai-snippet-file",
+    required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="Path to recommendations_snippet_ai.csv",
+)
+@click.option(
+    "--manual-snippet-file",
+    required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="Path to recommendations_snippet_manual.csv",
+)
+@click.option(
+    "--output-dir",
+    required=True,
+    type=click.Path(file_okay=False, dir_okay=True, path_type=Path),
+    help="Directory to write comparison.csv and metrics.json",
+)
+@click.option(
+    "--corpus-file",
+    default=None,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="Optional: path to Policy Briefs corpus.csv.xlsx for secondary comparison",
+)
+@click.option(
+    "--ai-docs-file",
+    default=None,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="Optional: path to documents.csv for visual-element comparison (requires --corpus-file)",
+)
+@click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
+def validate(
+    ai_snippet_file: Path,
+    manual_snippet_file: Path,
+    output_dir: Path,
+    corpus_file: Optional[Path],
+    ai_docs_file: Optional[Path],
+    verbose: bool,
+) -> None:
+    """Cross-validate AI snippet extractions against manual snippet extractions.
+
+    Primary comparison: recommendations_snippet_ai.csv vs
+    recommendations_snippet_manual.csv (presence, counts, extraction types).
+
+    Optional secondary comparison against PB-level corpus indicators when
+    --corpus-file is provided.
+    """
+    setup_logging(verbose)
+    logger = logging.getLogger(__name__)
+
+    validator = CrossValidator(corpus_path=corpus_file)
+
+    metrics = validator.compare(
+        ai_snippet_path=ai_snippet_file,
+        manual_snippet_path=manual_snippet_file,
+        output_dir=output_dir,
+        ai_docs_path=ai_docs_file,
+    )
+
+    logger.info("Cross-validation complete.")
+    primary = metrics.get("primary", {})
+    pres = primary.get("presence_agreement", {})
+    if pres.get("rate") is not None:
+        logger.info(
+            f"Presence agreement: {pres['agreed']}/{pres['total']} "
+            f"({pres['rate']:.1%})"
+        )
+    type_agr = primary.get("type_agreement", {})
+    if type_agr.get("rate") is not None:
+        logger.info(
+            f"Dominant type agreement: {type_agr['agreed']}/{type_agr['total']} "
+            f"({type_agr['rate']:.1%})"
+        )
 
 
 if __name__ == '__main__':
