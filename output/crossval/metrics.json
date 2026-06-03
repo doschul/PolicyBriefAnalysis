@@ -17,10 +17,16 @@
       "total": 105,
       "rate": 0.9809523809523809
     },
-    "overlap": {
+    "overlap_exact": {
       "manual_total": 1333,
       "manual_matched": 497,
       "overlap_rate": 0.37284321080270066
+    },
+    "overlap_fuzzy": {
+      "manual_total": 1333,
+      "manual_matched": 291,
+      "overlap_rate": 0.218304576144036,
+      "sim_threshold": 0.7
     }
   }
 }

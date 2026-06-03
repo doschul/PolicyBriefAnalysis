@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import re
+from difflib import SequenceMatcher
 
 import pandas as pd
 
@@ -71,6 +72,7 @@ class CrossValidator:
         manual_snippet_path: Path,
         output_dir: Path,
         ai_docs_path: Optional[Path] = None,
+        sim_threshold: float = 0.7,
     ) -> Dict[str, Any]:
         """Run cross-validation and write comparison.csv, crosstab.csv + metrics.json.
 
@@ -135,7 +137,7 @@ class CrossValidator:
         )
 
         # ── Content overlap ───────────────────────────────────────────────
-        overlap_per_doc = self._compute_overlap(ai_df, manual_df)
+        overlap_per_doc = self._compute_overlap(ai_df, manual_df, sim_threshold=sim_threshold)
         if not overlap_per_doc.empty:
             merged = merged.merge(overlap_per_doc, on="doc_id", how="left")
 
@@ -155,7 +157,7 @@ class CrossValidator:
 
         save_dataframe(merged, output_dir / "comparison.csv")
 
-        metrics = self._compute_metrics(merged, ai_df=ai_df, manual_df=manual_df)
+        metrics = self._compute_metrics(merged, ai_df=ai_df, manual_df=manual_df, sim_threshold=sim_threshold)
         save_json(metrics, output_dir / "metrics.json")
 
         logger.info(
@@ -311,21 +313,32 @@ class CrossValidator:
         return out
 
     def _compute_overlap(
-        self, ai_df: pd.DataFrame, manual_df: pd.DataFrame
+        self, ai_df: pd.DataFrame, manual_df: pd.DataFrame, sim_threshold: float = 0.7
     ) -> pd.DataFrame:
         """Per-document content overlap: fraction of manual segments found in AI output.
 
-        For each manual segment, checks whether its normalised text is a substring
-        of any AI segment for the same document, *or* any AI segment is a substring
-        of the manual text.  This handles shorter/longer spans with identical wording.
+        Two match modes are computed for every manual segment:
+
+        **Exact** — normalised substring containment (lowercase + whitespace collapse).
+        Checks whether the manual segment is contained in any AI text *or* any AI text
+        is contained in the manual segment.  No tolerance for character-level differences.
+
+        **Fuzzy** — ``difflib.SequenceMatcher`` ratio against every AI text in the same
+        document; a segment is fuzzy-matched when ``max(ratio) >= sim_threshold``.
+        The ratio is ``2 * matching_chars / total_chars`` so it is sensitive to both
+        length differences and character-level deviations.
 
         Returns a DataFrame with columns:
-            ``doc_id``, ``manual_total``, ``manual_matched``, ``overlap_rate``
+            ``doc_id``, ``manual_total``,
+            ``manual_matched``, ``overlap_rate``,
+            ``manual_fuzzy_matched``, ``fuzzy_overlap_rate``
         """
         if manual_df.empty or ai_df.empty:
-            return pd.DataFrame(
-                columns=["doc_id", "manual_total", "manual_matched", "overlap_rate"]
-            )
+            return pd.DataFrame(columns=[
+                "doc_id", "manual_total",
+                "manual_matched", "overlap_rate",
+                "manual_fuzzy_matched", "fuzzy_overlap_rate",
+            ])
 
         def _norm(text) -> str:
             if not isinstance(text, str):
@@ -347,20 +360,37 @@ class CrossValidator:
             doc_id = str(row["doc_id"])
             seg = _norm(row.get(manual_text_col, ""))
             ai_texts = ai_by_doc.get(doc_id, [])
-            matched = bool(seg) and any(
+
+            # Exact: substring containment in either direction
+            exact = bool(seg) and any(
                 (seg in ai) or (ai in seg)
                 for ai in ai_texts
                 if ai
             )
-            results.append({"doc_id": doc_id, "matched": matched})
+
+            # Fuzzy: best SequenceMatcher ratio across all AI texts
+            fuzzy = False
+            if bool(seg) and ai_texts:
+                best = max(
+                    (SequenceMatcher(None, seg, ai).ratio() for ai in ai_texts if ai),
+                    default=0.0,
+                )
+                fuzzy = best >= sim_threshold
+
+            results.append({"doc_id": doc_id, "exact": exact, "fuzzy": fuzzy})
 
         seg_df = pd.DataFrame(results)
         overlap = (
             seg_df.groupby("doc_id")
-            .agg(manual_total=("matched", "count"), manual_matched=("matched", "sum"))
+            .agg(
+                manual_total=("exact", "count"),
+                manual_matched=("exact", "sum"),
+                manual_fuzzy_matched=("fuzzy", "sum"),
+            )
             .reset_index()
         )
         overlap["overlap_rate"] = overlap["manual_matched"] / overlap["manual_total"]
+        overlap["fuzzy_overlap_rate"] = overlap["manual_fuzzy_matched"] / overlap["manual_total"]
         return overlap
 
     def _compute_metrics(
@@ -368,6 +398,7 @@ class CrossValidator:
         df: pd.DataFrame,
         ai_df: Optional[pd.DataFrame] = None,
         manual_df: Optional[pd.DataFrame] = None,
+        sim_threshold: float = 0.7,
     ) -> Dict[str, Any]:
         total = len(df)
         presence_valid = df[df["presence_agree"].notna()]
@@ -402,11 +433,19 @@ class CrossValidator:
         if "manual_total" in df.columns and "manual_matched" in df.columns:
             total_manual = int(df["manual_total"].sum())
             total_matched = int(df["manual_matched"].sum())
-            metrics["primary"]["overlap"] = {
+            metrics["primary"]["overlap_exact"] = {
                 "manual_total": total_manual,
                 "manual_matched": total_matched,
                 "overlap_rate": total_matched / total_manual if total_manual > 0 else None,
             }
+            if "manual_fuzzy_matched" in df.columns:
+                total_fuzzy = int(df["manual_fuzzy_matched"].sum())
+                metrics["primary"]["overlap_fuzzy"] = {
+                    "manual_total": total_manual,
+                    "manual_matched": total_fuzzy,
+                    "overlap_rate": total_fuzzy / total_manual if total_manual > 0 else None,
+                    "sim_threshold": sim_threshold,
+                }
 
         # Secondary metrics (only when corpus columns present)
         secondary: Dict[str, Any] = {}
