@@ -36,6 +36,8 @@ dependencies = [
     "spacy>=3.7.0",  # For linguistic analysis
     "nltk>=3.8.0",  # Additional text processing
     "tenacity>=8.2.0",  # For retry logic
+    "plotly>=5.0.0",    # For Sankey / interactive charts in notebook
+    "openpyxl>=3.1.0",  # For reading/writing .xlsx files
 ]
 
 [project.optional-dependencies]

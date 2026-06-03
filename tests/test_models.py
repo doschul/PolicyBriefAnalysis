@@ -168,7 +168,7 @@ class TestStructuralCoreResult:
             problem_status="present",
             problem_summary="Deforestation in the Amazon",
             solutions_count=3,
-            solutions_explicit=True,
+            solutions_status="present",
             implementation_status="weak",
             implementation_count=1,
             narrative_hook_present=True,
@@ -178,7 +178,7 @@ class TestStructuralCoreResult:
             implementation_explicitly_labelled=False,
             procedural_clarity_status="present",
         )
-        assert sc.solutions_explicit is True
+        assert sc.solutions_status == "present"
         assert sc.problem_explicitly_labelled is True
         assert sc.procedural_clarity_status == "present"
 
@@ -196,7 +196,7 @@ class TestStructuralCoreResult:
         sc = StructuralCoreResult(
             problem_status="present",
             problem_explicitly_labelled=False,
-            solutions_explicit=True,
+            solutions_status="present",
             solutions_explicitly_labelled=False,
         )
         assert sc.problem_status == "present"

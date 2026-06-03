@@ -161,7 +161,7 @@ def extract(
                         f"{summary['total_frames_present']} frames present")
             if summary.get('warnings'):
                 for w in summary['warnings']:
-                    logger.warning(f"  ⚠ {w}")
+                    logger.warning(f"  [WARN] {w}")
         
         if results['errors']:
             logger.warning(f"Encountered {len(results['errors'])} errors:")
@@ -240,12 +240,19 @@ def version() -> None:
     help="Configuration directory (for OpenAI settings)",
 )
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
+@click.option(
+    "--max-workers",
+    default=1,
+    show_default=True,
+    help="Number of parallel LLM workers (1 = sequential)",
+)
 def run_snippet_analysis(
     source_file: Path,
     input_source: str,
     output_dir: Path,
     config: Path,
     verbose: bool,
+    max_workers: int,
 ) -> None:
     """Re-run extraction on individual solution sentences.
 
@@ -282,6 +289,7 @@ def run_snippet_analysis(
         source_path=source_file,
         output_dir=output_dir,
         input_source=input_source,
+        max_workers=max_workers,
     )
     out_name = (
         "recommendations_snippet_ai.csv"

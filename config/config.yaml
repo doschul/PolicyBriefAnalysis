@@ -13,7 +13,7 @@ modules:
 openai:
   model: "gpt-4o-mini"  # Must support structured outputs
   temperature: 0.1
-  max_tokens: 4000
+  max_tokens: 16000  # gpt-4o-mini max output tokens
   timeout: 60
   max_retries: 5
   retry_delay: 2.0
@@ -52,11 +52,15 @@ frames:
   min_evidence_quotes: 1
   # Maximum evidence quotes to extract per frame
   max_evidence_quotes: 3
+  # Maximum chars per LLM chunk (~100K tokens = gpt-4o-mini context max minus prompt overhead)
+  max_chars_per_chunk: 400000
 
 # Recommendation Extraction
 recommendations:
   # Minimum confidence for extraction
   min_confidence: 0.6
+  # Maximum chars per LLM chunk (~100K tokens = gpt-4o-mini context max minus prompt overhead)
+  max_chars_per_chunk: 400000
   # Keywords that signal recommendations
   recommendation_signals:
     - "recommend"

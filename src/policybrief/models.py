@@ -213,7 +213,10 @@ class StructuralCoreResult(BaseModel):
     problem_status: str = Field(default="absent", description="present/absent/weak")
     problem_summary: Optional[str] = None
     solutions_count: int = 0
-    solutions_explicit: bool = False
+    solutions_status: str = Field(
+        default="absent",
+        description='present/weak/absent — are solutions explicitly proposed?',
+    )
     implementation_status: str = Field(default="absent", description="present/absent/weak")
     implementation_count: int = 0
     narrative_hook_present: bool = False

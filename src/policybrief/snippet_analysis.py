@@ -21,6 +21,9 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
+import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 import pandas as pd
 
 from .llm_client import LLMClient
@@ -55,6 +58,7 @@ class SnippetAnalyzer:
         source_path: Path,
         output_dir: Path,
         input_source: Literal["ai", "manual"] = "ai",
+        max_workers: int = 1,
     ) -> pd.DataFrame:
         """Run snippet-level extraction and write output CSV.
 
@@ -87,34 +91,30 @@ class SnippetAnalyzer:
             f"source sentences from {source_path}"
         )
 
-        all_rows: List[Dict[str, Any]] = []
-        for item in inputs:
-            doc_id = item["doc_id"]
-            source_text = item["source_text"]
-            parent_id = item["parent_id"]
-            parent_page = item["page"]
-
-            page = PageText(
-                page_num=parent_page,
-                text=source_text,
-                char_count=len(source_text),
-                word_count=len(source_text.split()),
+        def _process_item(item: Dict[str, Any]) -> List[Dict[str, Any]]:
+            _doc_id = item["doc_id"]
+            _source_text = item["source_text"]
+            _parent_id = item["parent_id"]
+            _parent_page = item["page"]
+            _page = PageText(
+                page_num=_parent_page,
+                text=_source_text,
+                char_count=len(_source_text),
+                word_count=len(_source_text.split()),
             )
-
             try:
-                extractions: List[PolicyExtraction] = self.extractor.extract_recommendations(
-                    [page], doc_id=doc_id, input_mode="snippet"
+                exts: List[PolicyExtraction] = self.extractor.extract_recommendations(
+                    [_page], doc_id=_doc_id, input_mode="snippet"
                 )
             except Exception as exc:
                 logger.warning(
-                    f"[{doc_id}] Snippet extraction failed for {parent_id}: {exc}"
+                    f"[{_doc_id}] Snippet extraction failed for {_parent_id}: {exc}"
                 )
-                continue
-
-            for ext in extractions:
-                all_rows.append({
-                    "doc_id": doc_id,
-                    "parent_id": parent_id,
+                return []
+            return [
+                {
+                    "doc_id": _doc_id,
+                    "parent_id": _parent_id,
                     "input_source": input_source,
                     "rec_id": ext.rec_id,
                     "extraction_type": ext.extraction_type.value,
@@ -136,7 +136,26 @@ class SnippetAnalyzer:
                         ext.geographic_scope.value if ext.geographic_scope else None
                     ),
                     "strength": ext.strength.value if ext.strength else None,
-                })
+                    "target_raw": ext.target_text_raw,
+                    "expected_outcomes": json.dumps(ext.expected_outcomes) if ext.expected_outcomes else None,
+                    "implementation_steps": json.dumps(ext.implementation_steps) if ext.implementation_steps else None,
+                    "trade_offs": json.dumps(ext.trade_offs) if ext.trade_offs else None,
+                }
+                for ext in exts
+            ]
+
+        all_rows: List[Dict[str, Any]] = []
+        if max_workers > 1:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [executor.submit(_process_item, item) for item in inputs]
+                for future in as_completed(futures):
+                    try:
+                        all_rows.extend(future.result())
+                    except Exception as exc:
+                        logger.warning(f"Snippet batch extraction error: {exc}")
+        else:
+            for item in inputs:
+                all_rows.extend(_process_item(item))
 
         result_df = pd.DataFrame(all_rows)
         out_name = (

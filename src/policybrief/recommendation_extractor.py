@@ -201,7 +201,7 @@ POLICY OPTION GUIDANCE:
 - Do NOT extract background descriptions of what different countries or regions have done as policy options — those are descriptive, not prescriptive.
 
 RULES:
-- source_quote MUST be a verbatim quote (10-500 characters) copied exactly from the document text.
+- source_quote MUST be a verbatim quote (10-1000 characters) copied exactly from the document text.
 - page MUST be the page number where the quote appears (use the [Page N] markers).
 - If the actor is not explicitly named, set actor_text_raw to null.
 - If the action is vague or implied, set action_text_raw to null.
@@ -397,7 +397,7 @@ class RecommendationExtractor:
 
         for chunk_idx, (chunk_pages, chunk_text) in enumerate(chunks):
             try:
-                raw_items = self._extract_from_chunk(chunk_text, suppress_actor=True)
+                raw_items = self._extract_from_chunk(chunk_text, suppress_actor=False)
                 extractions = self._validate_and_build(
                     raw_items, full_text, doc_id, len(all_extractions)
                 )

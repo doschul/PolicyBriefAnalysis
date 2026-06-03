@@ -538,15 +538,19 @@ class CrossValidator:
         # ── Field definitions ──────────────────────────────────────────────
         # (label, p1_col_after_merge, p2_col_after_merge)
         SHARED_FIELDS = [
-            ("extraction_type", "extraction_type_p1", "extraction_type_p2"),
-            ("actor_type",      "actor_type_p1",      "actor_type_p2"),
-            ("instrument_type", "instrument_type_p1", "instrument_type_p2"),
-            ("geographic_scope","geographic_scope_p1","geographic_scope_p2"),
-            ("strength",        "strength_p1",        "strength_p2"),
-            ("policy_domain",   "policy_domain_p1",   "policy_domain_p2"),
+            ("extraction_type",      "extraction_type_p1",      "extraction_type_p2"),
+            ("actor_type",           "actor_type_p1",           "actor_type_p2"),
+            ("instrument_type",      "instrument_type_p1",      "instrument_type_p2"),
+            ("geographic_scope",     "geographic_scope_p1",     "geographic_scope_p2"),
+            ("strength",             "strength_p1",             "strength_p2"),
+            ("policy_domain",        "policy_domain_p1",        "policy_domain_p2"),
+            ("target_raw",           "target_raw_p1",           "target_raw_p2"),
+            ("expected_outcomes",    "expected_outcomes_p1",    "expected_outcomes_p2"),
+            ("implementation_steps", "implementation_steps_p1", "implementation_steps_p2"),
+            ("trade_offs",           "trade_offs_p1",           "trade_offs_p2"),
         ]
         # Present only in Pass 1 — measure fill rate only
-        P1_ONLY_FIELDS = ["target_raw", "timeframe"]
+        P1_ONLY_FIELDS = ["timeframe"]
 
         def _fill_rate(col: str) -> Optional[float]:
             if col not in merged.columns:

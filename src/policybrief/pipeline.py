@@ -118,7 +118,7 @@ Return JSON with:
 - problem_status: "present"/"absent"/"weak"
 - problem_summary: brief description of the problem (null if absent)
 - solutions_count: integer count of distinct solutions
-- solutions_explicit: boolean, are solutions explicitly proposed?
+- solutions_status: "present" if solutions are explicitly and clearly proposed, "weak" if implied or only partially developed, "absent" if no solutions are proposed
 - implementation_status: "present"/"absent"/"weak"
 - implementation_count: number of implementation considerations
 - narrative_hook_present: boolean
@@ -175,8 +175,10 @@ class PolicyBriefPipeline:
         self._frame_detector: Optional[FrameDetector] = None
         self._recommendation_extractor: Optional[RecommendationExtractor] = None
 
-        # Content-hash cache
+        # Content-hash cache — pre-populated from existing audit files so
+        # incremental re-runs skip already-completed documents.
         self._hash_cache: Dict[str, str] = {}
+        self._load_hash_cache_from_audit()
 
         ensure_output_directories(self.output_dir)
 
@@ -237,31 +239,91 @@ class PolicyBriefPipeline:
             "errors": [],
         }
 
+        # Separate cached from to-process (hash checks are fast; do sequentially)
+        to_process: List[tuple] = []
         for fp in file_paths:
-            try:
-                doc_id = create_document_id(fp)
-                file_hash = self.pdf_extractor.compute_file_hash(fp)
+            doc_id = create_document_id(fp)
+            file_hash = self.pdf_extractor.compute_file_hash(fp)
+            if not self.force_reprocess and self._is_cached(doc_id, file_hash):
+                results["skipped"].append(doc_id)
+            else:
+                to_process.append((fp, doc_id, file_hash))
 
-                if not self.force_reprocess and self._is_cached(doc_id, file_hash):
-                    results["skipped"].append(doc_id)
-                    continue
+        # Load skipped docs from audit files so they appear in output CSVs
+        cached_results: List[PerDocumentExtraction] = []
+        for doc_id in results["skipped"]:
+            loaded = self._load_cached_result(doc_id)
+            if loaded is not None:
+                cached_results.append(loaded)
 
-                extraction = self._process_single(fp, doc_id, file_hash)
-                results["processed"].append(extraction)
+        if not to_process:
+            if cached_results:
+                self._generate_output_files(cached_results)
+            return results
 
-                # Write audit file
-                audit_path = self.output_dir / "audit" / f"{doc_id}.json"
-                save_json(extraction.model_dump(), audit_path)
+        # Warm up LLM client before threading to avoid lazy-init race
+        _ = self.llm_client
 
-            except Exception as exc:
-                logger.error(f"Failed to process {fp}: {exc}")
-                results["errors"].append(f"{fp}: {exc}")
+        def _process_one(fp: Path, doc_id: str, file_hash: str):
+            extraction = self._process_single(fp, doc_id, file_hash)
+            audit_path = self.output_dir / "audit" / f"{doc_id}.json"
+            save_json(extraction.model_dump(), audit_path)
+            return extraction
 
-        # Generate output tables from all processed results
-        if results["processed"]:
-            self._generate_output_files(results["processed"])
+        if self.max_workers > 1:
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                futures = {
+                    executor.submit(_process_one, fp, doc_id, fh): fp
+                    for fp, doc_id, fh in to_process
+                }
+                for future in as_completed(futures):
+                    fp = futures[future]
+                    try:
+                        results["processed"].append(future.result())
+                    except Exception as exc:
+                        logger.error(f"Failed to process {fp}: {exc}")
+                        results["errors"].append(f"{fp}: {exc}")
+        else:
+            for fp, doc_id, file_hash in to_process:
+                try:
+                    results["processed"].append(_process_one(fp, doc_id, file_hash))
+                except Exception as exc:
+                    logger.error(f"Failed to process {fp}: {exc}")
+                    results["errors"].append(f"{fp}: {exc}")
+
+        # Generate output tables — combine newly processed + previously cached
+        all_results = cached_results + results["processed"]
+        if all_results:
+            self._generate_output_files(all_results)
 
         return results
+
+    def _load_hash_cache_from_audit(self) -> None:
+        """Pre-populate hash cache from existing audit JSON files."""
+        audit_dir = self.output_dir / "audit"
+        if not audit_dir.exists():
+            return
+        for json_file in audit_dir.glob("*.json"):
+            try:
+                data = load_json(json_file)
+                doc_id = data.get("doc_id")
+                file_hash = (data.get("processing_status") or {}).get("file_hash")
+                if doc_id and file_hash:
+                    self._hash_cache[doc_id] = file_hash
+            except Exception:
+                pass  # Corrupt audit file — will be reprocessed
+
+    def _load_cached_result(self, doc_id: str) -> Optional["PerDocumentExtraction"]:
+        """Load a previously saved extraction result from its audit JSON."""
+        audit_path = self.output_dir / "audit" / f"{doc_id}.json"
+        if not audit_path.exists():
+            return None
+        try:
+            data = load_json(audit_path)
+            return PerDocumentExtraction.model_validate(data)
+        except Exception as exc:
+            logger.warning(f"[{doc_id}] Could not load cached result: {exc}")
+            return None
 
     def _is_cached(self, doc_id: str, file_hash: str) -> bool:
         cached = self._hash_cache.get(doc_id)
@@ -499,6 +561,9 @@ class PolicyBriefPipeline:
                     "geographic_scope": pe.geographic_scope.value if pe.geographic_scope else None,
                     "timeframe": pe.timeframe.value if pe.timeframe else None,
                     "policy_domain": pe.policy_domain,
+                    "expected_outcomes": json.dumps(pe.expected_outcomes) if pe.expected_outcomes else None,
+                    "implementation_steps": json.dumps(pe.implementation_steps) if pe.implementation_steps else None,
+                    "trade_offs": json.dumps(pe.trade_offs) if pe.trade_offs else None,
                 }
                 rows.append(row)
         save_dataframe(pd.DataFrame(rows), self.output_dir / "recommendations.csv")

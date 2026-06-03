@@ -128,8 +128,7 @@ resonate_5,19,recommendation,15,Recommendation,True,True,True,True,15.0,11.0,11.
 resonate_6,7,recommendation,0,,True,False,False,,,,,,
 resonate_7,8,recommendation,15,Recommendation,True,True,True,True,15.0,6.0,5.0,0.4,0.3333333333333333
 resonate_8,3,recommendation,3,Recommendation,True,True,True,True,3.0,3.0,3.0,1.0,1.0
-rosewood4,0,,9,Recommendation,False,True,False,,9.0,0.0,0.0,0.0,0.0
-rosewood40,9,recommendation,0,,True,False,False,,,,,,
+rosewood40,9,recommendation,9,Recommendation,True,True,True,True,9.0,5.0,3.0,0.5555555555555556,0.3333333333333333
 safers,8,recommendation,8,Recommendation,True,True,True,True,8.0,8.0,4.0,1.0,0.5
 silvanus_1,22,recommendation,0,,True,False,False,,,,,,
 silvanus_2,54,recommendation,37,Recommendation,True,True,True,True,37.0,23.0,14.0,0.6216216216216216,0.3783783783783784
