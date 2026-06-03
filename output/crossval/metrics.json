@@ -1,0 +1,26 @@
+{
+  "total_documents": 152,
+  "primary": {
+    "overview": {
+      "ai_total_solutions": 1642,
+      "manual_total_solutions": 1333,
+      "ai_solution_docs": 151,
+      "manual_solution_docs": 106
+    },
+    "presence_agreement": {
+      "agreed": 105,
+      "total": 152,
+      "rate": 0.6907894736842105
+    },
+    "type_agreement": {
+      "agreed": 103,
+      "total": 105,
+      "rate": 0.9809523809523809
+    },
+    "overlap": {
+      "manual_total": 1333,
+      "manual_matched": 497,
+      "overlap_rate": 0.37284321080270066
+    }
+  }
+}

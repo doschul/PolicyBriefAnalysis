@@ -22,6 +22,8 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import re
+
 import pandas as pd
 
 from .utils import create_document_id, save_dataframe, save_json
@@ -70,17 +72,23 @@ class CrossValidator:
         output_dir: Path,
         ai_docs_path: Optional[Path] = None,
     ) -> Dict[str, Any]:
-        """Run cross-validation and write comparison.csv + metrics.json.
+        """Run cross-validation and write comparison.csv, crosstab.csv + metrics.json.
 
         Parameters
         ----------
         ai_snippet_path:
             Path to ``recommendations_snippet_ai.csv`` (AI snippet pass output).
         manual_snippet_path:
-            Path to ``recommendations_snippet_manual.csv`` (manual snippet pass
-            output).
+            Path to the manual data file.  Accepted formats:
+
+            - ``.xlsx`` / ``.xls``: spreadsheet with columns ``Document name``,
+              ``Solution type``, ``Segment`` (e.g. ``PBs solutions coded
+              segments.xlsx``).
+            - ``.csv``: ``recommendations_snippet_manual.csv`` in the same schema
+              as the AI snippet output.
         output_dir:
-            Directory where ``comparison.csv`` and ``metrics.json`` are written.
+            Directory where ``comparison.csv``, ``crosstab.csv``, and
+            ``metrics.json`` are written.
         ai_docs_path:
             Optional path to ``documents.csv`` from the pipeline.  When
             provided, ``has_visual_elements`` is included in the comparison
@@ -96,7 +104,14 @@ class CrossValidator:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         ai_df = pd.read_csv(ai_snippet_path)
-        manual_df = pd.read_csv(manual_snippet_path)
+
+        # Load manual data — xlsx (Document name / Solution type / Segment)
+        # or a CSV in the same schema as the AI snippet output
+        manual_path = Path(manual_snippet_path)
+        if manual_path.suffix.lower() in (".xlsx", ".xls"):
+            manual_df = self._load_manual_xlsx(manual_path)
+        else:
+            manual_df = pd.read_csv(manual_path)
 
         ai_agg = self._aggregate_snippets(ai_df, prefix="ai")
         manual_agg = self._aggregate_snippets(manual_df, prefix="manual")
@@ -119,13 +134,28 @@ class CrossValidator:
             axis=1,
         )
 
+        # ── Content overlap ───────────────────────────────────────────────
+        overlap_per_doc = self._compute_overlap(ai_df, manual_df)
+        if not overlap_per_doc.empty:
+            merged = merged.merge(overlap_per_doc, on="doc_id", how="left")
+
+        # ── Crosstab: manual_count × ai_count ────────────────────────────
+        crosstab = pd.crosstab(
+            merged["manual_count"],
+            merged["ai_count"],
+            rownames=["manual_count"],
+            colnames=["ai_count"],
+        )
+        crosstab.to_csv(output_dir / "crosstab.csv")
+        logger.info(f"Crosstab written to {output_dir / 'crosstab.csv'}")
+
         # Optional secondary: compare against PB-level corpus indicators
         if self.corpus_path is not None:
             merged = self._attach_corpus(merged, ai_docs_path)
 
         save_dataframe(merged, output_dir / "comparison.csv")
 
-        metrics = self._compute_metrics(merged)
+        metrics = self._compute_metrics(merged, ai_df=ai_df, manual_df=manual_df)
         save_json(metrics, output_dir / "metrics.json")
 
         logger.info(
@@ -238,7 +268,107 @@ class CrossValidator:
             return False
         return None
 
-    def _compute_metrics(self, df: pd.DataFrame) -> Dict[str, Any]:
+    def _load_manual_xlsx(self, path: Path) -> pd.DataFrame:
+        """Load manual solution segments from xlsx.
+
+        Expected columns (case-insensitive): ``Document name``, ``Solution type``,
+        ``Segment``.  Returns a DataFrame with ``doc_id``, ``rec_id``,
+        ``extraction_type``, ``source_text`` — compatible with
+        ``_aggregate_snippets()``.
+        """
+        raw = pd.read_excel(path)
+        col_lower = {c.lower().strip(): c for c in raw.columns}
+
+        def _find(*candidates: str) -> Optional[str]:
+            for c in candidates:
+                if c.lower() in col_lower:
+                    return col_lower[c.lower()]
+            return None
+
+        doc_col = _find("document name", "document_name")
+        seg_col = _find("segment")
+        type_col = _find("solution type", "solution_type")
+
+        if doc_col is None or seg_col is None:
+            raise ValueError(
+                f"Manual xlsx must contain 'Document name' and 'Segment' columns. "
+                f"Found: {list(raw.columns)}"
+            )
+
+        out = pd.DataFrame()
+        out["doc_id"] = raw[doc_col].apply(
+            lambda x: create_document_id(Path(str(x).strip())) if pd.notna(x) else None
+        )
+        out["source_text"] = raw[seg_col]
+        out["extraction_type"] = raw[type_col] if type_col else "solution"
+        out = out.dropna(subset=["doc_id", "source_text"]).reset_index(drop=True)
+        out["rec_id"] = [f"{row.doc_id}_m{i}" for i, row in out.iterrows()]
+
+        logger.info(
+            f"Loaded {len(out)} manual segments from {path.name} "
+            f"({out['doc_id'].nunique()} documents)"
+        )
+        return out
+
+    def _compute_overlap(
+        self, ai_df: pd.DataFrame, manual_df: pd.DataFrame
+    ) -> pd.DataFrame:
+        """Per-document content overlap: fraction of manual segments found in AI output.
+
+        For each manual segment, checks whether its normalised text is a substring
+        of any AI segment for the same document, *or* any AI segment is a substring
+        of the manual text.  This handles shorter/longer spans with identical wording.
+
+        Returns a DataFrame with columns:
+            ``doc_id``, ``manual_total``, ``manual_matched``, ``overlap_rate``
+        """
+        if manual_df.empty or ai_df.empty:
+            return pd.DataFrame(
+                columns=["doc_id", "manual_total", "manual_matched", "overlap_rate"]
+            )
+
+        def _norm(text) -> str:
+            if not isinstance(text, str):
+                return ""
+            return re.sub(r"\s+", " ", text).strip().lower()
+
+        ai_text_col = "source_text_raw" if "source_text_raw" in ai_df.columns else "source_text"
+        manual_text_col = "source_text" if "source_text" in manual_df.columns else "source_text_raw"
+
+        # Build per-doc list of normalised AI texts
+        ai_by_doc: Dict[str, list] = {}
+        for doc_id, grp in ai_df.groupby("doc_id"):
+            ai_by_doc[str(doc_id)] = [
+                _norm(t) for t in grp[ai_text_col] if pd.notna(t)
+            ]
+
+        results = []
+        for _, row in manual_df.iterrows():
+            doc_id = str(row["doc_id"])
+            seg = _norm(row.get(manual_text_col, ""))
+            ai_texts = ai_by_doc.get(doc_id, [])
+            matched = bool(seg) and any(
+                (seg in ai) or (ai in seg)
+                for ai in ai_texts
+                if ai
+            )
+            results.append({"doc_id": doc_id, "matched": matched})
+
+        seg_df = pd.DataFrame(results)
+        overlap = (
+            seg_df.groupby("doc_id")
+            .agg(manual_total=("matched", "count"), manual_matched=("matched", "sum"))
+            .reset_index()
+        )
+        overlap["overlap_rate"] = overlap["manual_matched"] / overlap["manual_total"]
+        return overlap
+
+    def _compute_metrics(
+        self,
+        df: pd.DataFrame,
+        ai_df: Optional[pd.DataFrame] = None,
+        manual_df: Optional[pd.DataFrame] = None,
+    ) -> Dict[str, Any]:
         total = len(df)
         presence_valid = df[df["presence_agree"].notna()]
         presence_agree_count = int(presence_valid["presence_agree"].sum()) if not presence_valid.empty else 0
@@ -249,6 +379,12 @@ class CrossValidator:
         metrics: Dict[str, Any] = {
             "total_documents": total,
             "primary": {
+                "overview": {
+                    "ai_total_solutions": int(len(ai_df)) if ai_df is not None else int(df["ai_count"].sum()),
+                    "manual_total_solutions": int(len(manual_df)) if manual_df is not None else int(df["manual_count"].sum()),
+                    "ai_solution_docs": int(df["ai_has_solutions"].sum()),
+                    "manual_solution_docs": int(df["manual_has_solutions"].sum()),
+                },
                 "presence_agreement": {
                     "agreed": presence_agree_count,
                     "total": len(presence_valid),
@@ -259,10 +395,18 @@ class CrossValidator:
                     "total": len(type_valid),
                     "rate": type_agree_count / len(type_valid) if len(type_valid) > 0 else None,
                 },
-                "ai_solution_docs": int(df["ai_has_solutions"].sum()),
-                "manual_solution_docs": int(df["manual_has_solutions"].sum()),
             },
         }
+
+        # Content overlap aggregate (populated when _compute_overlap ran)
+        if "manual_total" in df.columns and "manual_matched" in df.columns:
+            total_manual = int(df["manual_total"].sum())
+            total_matched = int(df["manual_matched"].sum())
+            metrics["primary"]["overlap"] = {
+                "manual_total": total_manual,
+                "manual_matched": total_matched,
+                "overlap_rate": total_matched / total_manual if total_manual > 0 else None,
+            }
 
         # Secondary metrics (only when corpus columns present)
         secondary: Dict[str, Any] = {}
