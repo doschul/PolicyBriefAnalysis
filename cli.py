@@ -329,6 +329,12 @@ def run_snippet_analysis(
     type=float,
     help="SequenceMatcher ratio threshold for fuzzy segment matching (0–1)",
 )
+@click.option(
+    "--full-recs-file",
+    default=None,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="Optional: path to recommendations.csv (Pass 1) for context comparison vs AI-snippet pass",
+)
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
 def validate(
     ai_snippet_file: Path,
@@ -337,6 +343,7 @@ def validate(
     corpus_file: Optional[Path],
     ai_docs_file: Optional[Path],
     sim_threshold: float,
+    full_recs_file: Optional[Path],
     verbose: bool,
 ) -> None:
     """Cross-validate AI snippet extractions against manual snippet extractions.
@@ -346,6 +353,10 @@ def validate(
 
     Optional secondary comparison against PB-level corpus indicators when
     --corpus-file is provided.
+
+    Optional Pass 1 vs Pass 2 field-quality comparison when --full-recs-file
+    is provided; writes context_comparison.csv and adds context_comparison
+    section to metrics.json.
     """
     setup_logging(verbose)
     logger = logging.getLogger(__name__)
@@ -358,6 +369,7 @@ def validate(
         output_dir=output_dir,
         ai_docs_path=ai_docs_file,
         sim_threshold=sim_threshold,
+        full_recs_path=full_recs_file,
     )
 
     logger.info("Cross-validation complete.")

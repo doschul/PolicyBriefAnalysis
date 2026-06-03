@@ -73,6 +73,7 @@ class CrossValidator:
         output_dir: Path,
         ai_docs_path: Optional[Path] = None,
         sim_threshold: float = 0.7,
+        full_recs_path: Optional[Path] = None,
     ) -> Dict[str, Any]:
         """Run cross-validation and write comparison.csv, crosstab.csv + metrics.json.
 
@@ -95,12 +96,17 @@ class CrossValidator:
             Optional path to ``documents.csv`` from the pipeline.  When
             provided, ``has_visual_elements`` is included in the comparison
             (secondary comparison, requires ``corpus_path`` to be set).
+        full_recs_path:
+            Optional path to ``recommendations.csv`` (Pass 1 full-text output).
+            When provided, a Pass 1 vs Pass 2 field-quality comparison is run
+            and written to ``context_comparison.csv``; results are added to
+            ``metrics.json`` under the ``context_comparison`` key.
 
         Returns
         -------
         dict
-            Aggregate metrics dict with ``primary`` and optional ``secondary``
-            keys.
+            Aggregate metrics dict with ``primary``, optional ``secondary``,
+            and optional ``context_comparison`` keys.
         """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -158,6 +164,17 @@ class CrossValidator:
         save_dataframe(merged, output_dir / "comparison.csv")
 
         metrics = self._compute_metrics(merged, ai_df=ai_df, manual_df=manual_df, sim_threshold=sim_threshold)
+
+        # Optional Pass 1 vs Pass 2 context comparison
+        if full_recs_path is not None:
+            ctx = self._compare_passes(
+                full_recs_path=Path(full_recs_path),
+                snippet_ai_path=Path(ai_snippet_path),
+                output_dir=output_dir,
+            )
+            if ctx:
+                metrics["context_comparison"] = ctx
+
         save_json(metrics, output_dir / "metrics.json")
 
         logger.info(
@@ -463,4 +480,166 @@ class CrossValidator:
             metrics["secondary"] = secondary
 
         return metrics
+
+    def _compare_passes(
+        self,
+        full_recs_path: Path,
+        snippet_ai_path: Path,
+        output_dir: Path,
+    ) -> Dict[str, Any]:
+        """Compare Pass 1 (full-text) vs Pass 2 (AI-snippet) field populations.
+
+        Joins Pass 1 ``recommendations.csv`` to Pass 2
+        ``recommendations_snippet_ai.csv`` on ``rec_id`` (P1) = ``parent_id``
+        (P2).  Measures:
+
+        - Fill rate per field in each pass (fraction of non-null, non-empty values)
+        - Agreement rate for shared fields (restricted to pairs where both passes
+          produced a value)
+        - Median confidence delta (Pass 2 − Pass 1)
+
+        Writes ``context_comparison.csv`` (one row per matched extraction pair)
+        to *output_dir*.
+        """
+        p1 = pd.read_csv(full_recs_path)
+        p2 = pd.read_csv(snippet_ai_path)
+
+        if "rec_id" not in p1.columns or "parent_id" not in p2.columns:
+            logger.warning(
+                "_compare_passes: missing join columns (rec_id in Pass 1, "
+                "parent_id in Pass 2); skipping context comparison"
+            )
+            return {}
+
+        # Align actor-type column name before merge
+        p2 = p2.copy()
+        if "actor_type_normalized" in p2.columns:
+            p2 = p2.rename(columns={"actor_type_normalized": "actor_type"})
+
+        merged = p1.merge(
+            p2,
+            left_on="rec_id",
+            right_on="parent_id",
+            suffixes=("_p1", "_p2"),
+        )
+
+        if merged.empty:
+            logger.warning(
+                "_compare_passes: inner join produced no rows; "
+                "check that rec_id / parent_id values align"
+            )
+            return {}
+
+        doc_id_col = "doc_id_p1" if "doc_id_p1" in merged.columns else "doc_id"
+        n_pairs = len(merged)
+        n_docs = merged[doc_id_col].nunique()
+        logger.info(f"_compare_passes: {n_pairs} matched pairs from {n_docs} documents")
+
+        # ── Field definitions ──────────────────────────────────────────────
+        # (label, p1_col_after_merge, p2_col_after_merge)
+        SHARED_FIELDS = [
+            ("extraction_type", "extraction_type_p1", "extraction_type_p2"),
+            ("actor_type",      "actor_type_p1",      "actor_type_p2"),
+            ("instrument_type", "instrument_type_p1", "instrument_type_p2"),
+            ("geographic_scope","geographic_scope_p1","geographic_scope_p2"),
+            ("strength",        "strength_p1",        "strength_p2"),
+            ("policy_domain",   "policy_domain_p1",   "policy_domain_p2"),
+        ]
+        # Present only in Pass 1 — measure fill rate only
+        P1_ONLY_FIELDS = ["target_raw", "timeframe"]
+
+        def _fill_rate(col: str) -> Optional[float]:
+            if col not in merged.columns:
+                return None
+            s = merged[col].dropna()
+            s = s[s.astype(str).str.strip() != ""]
+            return round(len(s) / len(merged), 4) if len(merged) > 0 else 0.0
+
+        # ── Fill rates ─────────────────────────────────────────────────────
+        fill_rates: Dict[str, Any] = {}
+        for label, p1_col, p2_col in SHARED_FIELDS:
+            fill_rates[label] = {"pass1": _fill_rate(p1_col), "pass2": _fill_rate(p2_col)}
+        for col in P1_ONLY_FIELDS:
+            fill_rates[col] = {"pass1": _fill_rate(col), "pass2": None}
+
+        # ── Agreement rates ────────────────────────────────────────────────
+        agreement_rates: Dict[str, Any] = {}
+        for label, p1_col, p2_col in SHARED_FIELDS:
+            if p1_col not in merged.columns or p2_col not in merged.columns:
+                continue
+            both = (
+                merged[p1_col].notna()
+                & merged[p2_col].notna()
+                & (merged[p1_col].astype(str).str.strip() != "")
+                & (merged[p2_col].astype(str).str.strip() != "")
+            )
+            sub = merged[both]
+            if len(sub) == 0:
+                agreement_rates[label] = {"agreed": 0, "total": 0, "rate": None}
+                continue
+            agree = (
+                sub[p1_col].astype(str).str.lower().str.strip()
+                == sub[p2_col].astype(str).str.lower().str.strip()
+            )
+            agreement_rates[label] = {
+                "agreed": int(agree.sum()),
+                "total": len(sub),
+                "rate": round(float(agree.mean()), 4),
+            }
+
+        # ── Confidence delta ───────────────────────────────────────────────
+        conf_delta: Optional[float] = None
+        if "confidence_p1" in merged.columns and "confidence_p2" in merged.columns:
+            valid_conf = merged[["confidence_p1", "confidence_p2"]].dropna()
+            if not valid_conf.empty:
+                conf_delta = round(
+                    float((valid_conf["confidence_p2"] - valid_conf["confidence_p1"]).median()), 4
+                )
+
+        # ── Per-row output CSV ─────────────────────────────────────────────
+        out: Dict[str, Any] = {}
+        out["doc_id"] = merged[doc_id_col]
+        rec_p1 = "rec_id_p1" if "rec_id_p1" in merged.columns else "rec_id"
+        rec_p2 = "rec_id_p2" if "rec_id_p2" in merged.columns else None
+        out["rec_id_p1"] = merged[rec_p1]
+        if rec_p2 and rec_p2 in merged.columns:
+            out["rec_id_p2"] = merged[rec_p2]
+
+        for label, p1_col, p2_col in SHARED_FIELDS:
+            if p1_col in merged.columns:
+                out[f"{label}_p1"] = merged[p1_col]
+            if p2_col in merged.columns:
+                out[f"{label}_p2"] = merged[p2_col]
+            if p1_col in merged.columns and p2_col in merged.columns:
+                both = merged[p1_col].notna() & merged[p2_col].notna()
+                out[f"{label}_agree"] = both & (
+                    merged[p1_col].astype(str).str.lower().str.strip()
+                    == merged[p2_col].astype(str).str.lower().str.strip()
+                )
+
+        for col in P1_ONLY_FIELDS:
+            if col in merged.columns:
+                out[f"{col}_p1"] = merged[col]
+
+        if "confidence_p1" in merged.columns:
+            out["confidence_p1"] = merged["confidence_p1"]
+        if "confidence_p2" in merged.columns:
+            out["confidence_p2"] = merged["confidence_p2"]
+        if "confidence_p1" in merged.columns and "confidence_p2" in merged.columns:
+            out["confidence_delta"] = merged["confidence_p2"] - merged["confidence_p1"]
+
+        out_df = pd.DataFrame(out)
+        save_dataframe(out_df, output_dir / "context_comparison.csv")
+        logger.info(
+            f"Context comparison written: {len(out_df)} rows -> "
+            f"{output_dir / 'context_comparison.csv'}"
+        )
+
+        return {
+            "matched_pairs": n_pairs,
+            "documents": n_docs,
+            "fill_rates": fill_rates,
+            "agreement_rates": agreement_rates,
+            "confidence_delta_median": conf_delta,
+        }
 

@@ -1,5 +1,5 @@
 {
-  "total_documents": 152,
+  "total_documents": 151,
   "primary": {
     "overview": {
       "ai_total_solutions": 1642,
@@ -8,25 +8,96 @@
       "manual_solution_docs": 106
     },
     "presence_agreement": {
-      "agreed": 105,
-      "total": 152,
-      "rate": 0.6907894736842105
+      "agreed": 106,
+      "total": 151,
+      "rate": 0.7019867549668874
     },
     "type_agreement": {
-      "agreed": 103,
-      "total": 105,
-      "rate": 0.9809523809523809
+      "agreed": 104,
+      "total": 106,
+      "rate": 0.9811320754716981
     },
     "overlap_exact": {
       "manual_total": 1333,
-      "manual_matched": 497,
-      "overlap_rate": 0.37284321080270066
+      "manual_matched": 502,
+      "overlap_rate": 0.3765941485371343
     },
     "overlap_fuzzy": {
       "manual_total": 1333,
-      "manual_matched": 291,
-      "overlap_rate": 0.218304576144036,
+      "manual_matched": 294,
+      "overlap_rate": 0.22055513878469618,
       "sim_threshold": 0.7
     }
+  },
+  "context_comparison": {
+    "matched_pairs": 1642,
+    "documents": 151,
+    "fill_rates": {
+      "extraction_type": {
+        "pass1": 1.0,
+        "pass2": 1.0
+      },
+      "actor_type": {
+        "pass1": 0.0974,
+        "pass2": 0.4032
+      },
+      "instrument_type": {
+        "pass1": 0.0,
+        "pass2": 0.0006
+      },
+      "geographic_scope": {
+        "pass1": 0.0,
+        "pass2": 0.0
+      },
+      "strength": {
+        "pass1": 0.0,
+        "pass2": 0.0006
+      },
+      "policy_domain": {
+        "pass1": 0.0,
+        "pass2": 0.0
+      },
+      "target_raw": {
+        "pass1": 0.2716,
+        "pass2": null
+      },
+      "timeframe": {
+        "pass1": 0.0,
+        "pass2": null
+      }
+    },
+    "agreement_rates": {
+      "extraction_type": {
+        "agreed": 1297,
+        "total": 1642,
+        "rate": 0.7899
+      },
+      "actor_type": {
+        "agreed": 105,
+        "total": 117,
+        "rate": 0.8974
+      },
+      "instrument_type": {
+        "agreed": 0,
+        "total": 0,
+        "rate": null
+      },
+      "geographic_scope": {
+        "agreed": 0,
+        "total": 0,
+        "rate": null
+      },
+      "strength": {
+        "agreed": 0,
+        "total": 0,
+        "rate": null
+      },
+      "policy_domain": {
+        "agreed": 0,
+        "total": 0,
+        "rate": null
+      }
+    },
+    "confidence_delta_median": 0.0
   }
 }
