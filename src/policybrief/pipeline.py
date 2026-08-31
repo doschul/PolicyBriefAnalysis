@@ -528,6 +528,8 @@ class PolicyBriefPipeline:
                     "doc_id": r.doc_id,
                     "frame_id": fa.frame_id,
                     "frame_label": fa.frame_label,
+                    "source_provenance": "full_policy_brief_text",
+                    "analysis_level": "document_level_instrument_frame",
                     "decision": fa.decision.value,
                     "confidence": fa.confidence,
                     "evidence_count": len(fa.evidence),
@@ -548,6 +550,8 @@ class PolicyBriefPipeline:
                 row = {
                     "doc_id": r.doc_id,
                     "rec_id": pe.rec_id,
+                    "source_provenance": "full_policy_brief_text",
+                    "analysis_level": "policy_extraction",
                     "extraction_type": pe.extraction_type.value,
                     "confidence": pe.confidence,
                     "source_text": clean_text_for_csv(pe.source_text_raw, 500),

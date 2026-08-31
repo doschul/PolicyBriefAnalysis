@@ -1,49 +1,59 @@
 {
-  "total_documents": 151,
+  "total_documents": 154,
   "primary": {
     "overview": {
-      "ai_total_solutions": 1642,
+      "ai_total_solutions": 1041,
       "manual_total_solutions": 1333,
-      "ai_solution_docs": 151,
+      "ai_solution_docs": 152,
       "manual_solution_docs": 106
     },
     "presence_agreement": {
-      "agreed": 106,
-      "total": 151,
-      "rate": 0.7019867549668874
+      "agreed": 104,
+      "total": 154,
+      "rate": 0.6753246753246753
     },
     "type_agreement": {
-      "agreed": 104,
-      "total": 106,
-      "rate": 0.9811320754716981
+      "agreed": 102,
+      "total": 104,
+      "rate": 0.9807692307692307
     },
     "overlap_exact": {
       "manual_total": 1333,
-      "manual_matched": 502,
-      "overlap_rate": 0.3765941485371343
+      "manual_matched": 366,
+      "overlap_rate": 0.2745686421605401
     },
     "overlap_fuzzy": {
       "manual_total": 1333,
-      "manual_matched": 294,
-      "overlap_rate": 0.22055513878469618,
+      "manual_matched": 218,
+      "overlap_rate": 0.16354088522130533,
       "sim_threshold": 0.7
     }
   },
+  "validation_inputs": {
+    "ai": {
+      "provenance": "ai_extracted_recommendation_segment",
+      "documents": 152
+    },
+    "manual": {
+      "provenance": "manually_coded_recommendation_segment",
+      "documents": 106
+    }
+  },
   "context_comparison": {
-    "matched_pairs": 1642,
-    "documents": 151,
+    "matched_pairs": 1041,
+    "documents": 152,
     "fill_rates": {
       "extraction_type": {
         "pass1": 1.0,
         "pass2": 1.0
       },
       "actor_type": {
-        "pass1": 0.0974,
-        "pass2": 0.4032
+        "pass1": 0.4573,
+        "pass2": 0.4227
       },
       "instrument_type": {
-        "pass1": 0.0,
-        "pass2": 0.0006
+        "pass1": 0.0019,
+        "pass2": 0.0
       },
       "geographic_scope": {
         "pass1": 0.0,
@@ -51,15 +61,27 @@
       },
       "strength": {
         "pass1": 0.0,
-        "pass2": 0.0006
+        "pass2": 0.0
       },
       "policy_domain": {
         "pass1": 0.0,
         "pass2": 0.0
       },
       "target_raw": {
-        "pass1": 0.2716,
-        "pass2": null
+        "pass1": 0.6503,
+        "pass2": 0.8338
+      },
+      "expected_outcomes": {
+        "pass1": 0.0797,
+        "pass2": 0.0519
+      },
+      "implementation_steps": {
+        "pass1": 0.0471,
+        "pass2": 0.0086
+      },
+      "trade_offs": {
+        "pass1": 0.0183,
+        "pass2": 0.0067
       },
       "timeframe": {
         "pass1": 0.0,
@@ -68,14 +90,14 @@
     },
     "agreement_rates": {
       "extraction_type": {
-        "agreed": 1297,
-        "total": 1642,
-        "rate": 0.7899
+        "agreed": 931,
+        "total": 1041,
+        "rate": 0.8943
       },
       "actor_type": {
-        "agreed": 105,
-        "total": 117,
-        "rate": 0.8974
+        "agreed": 205,
+        "total": 262,
+        "rate": 0.7824
       },
       "instrument_type": {
         "agreed": 0,
@@ -93,6 +115,26 @@
         "rate": null
       },
       "policy_domain": {
+        "agreed": 0,
+        "total": 0,
+        "rate": null
+      },
+      "target_raw": {
+        "agreed": 146,
+        "total": 585,
+        "rate": 0.2496
+      },
+      "expected_outcomes": {
+        "agreed": 1,
+        "total": 5,
+        "rate": 0.2
+      },
+      "implementation_steps": {
+        "agreed": 0,
+        "total": 1,
+        "rate": 0.0
+      },
+      "trade_offs": {
         "agreed": 0,
         "total": 0,
         "rate": null

@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 _MANUAL_DOC_COL = "Document name"
 _MANUAL_TEXT_COL = "Segment"
 _MANUAL_TYPE_COL = "Solution type"
+_RECOMMENDATION_ANALYSIS_TYPES = {"recommendation", "policy_option"}
 
 
 class SnippetAnalyzer:
@@ -116,6 +117,12 @@ class SnippetAnalyzer:
                     "doc_id": _doc_id,
                     "parent_id": _parent_id,
                     "input_source": input_source,
+                    "source_provenance": (
+                        "ai_extracted_recommendation_segment"
+                        if input_source == "ai"
+                        else "manually_coded_recommendation_segment"
+                    ),
+                    "analysis_level": "recommendation_segment",
                     "rec_id": ext.rec_id,
                     "extraction_type": ext.extraction_type.value,
                     "confidence": ext.confidence,
@@ -201,6 +208,9 @@ class SnippetAnalyzer:
             raise ValueError(
                 f"recommendations.csv is missing required column(s): {missing}"
             )
+        if "extraction_type" not in df.columns:
+            raise ValueError("recommendations.csv is missing required column 'extraction_type'")
+        df = df[df["extraction_type"].isin(_RECOMMENDATION_ANALYSIS_TYPES)].copy()
         df = df[df[text_col].notna()].copy()
         df = df[df[text_col].astype(str).str.strip() != ""]
 

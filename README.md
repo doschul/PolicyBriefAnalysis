@@ -14,6 +14,82 @@ The pipeline processes PDF policy briefs through four LLM passes, bookended by d
 
 Deterministic rails handle PDF parsing, metrics, reference-boundary exclusion, evidence verification, normalization, deduplication, and output generation. Each stage is independently toggleable. If any stage fails at runtime, the pipeline logs a warning and continues (graceful degradation).
 
+### Current End-to-End Workflow
+
+The observation counts below are from the current full-corpus run (154 PDFs).
+
+```text
+[154 policy-brief PDFs: data/policy_briefs_arthur]
+       |
+       v
+       [PDF text + metadata extraction]
+       |
+       +-----------------------------------------------+
+       |                                               |
+       v                                               v
+  [Pass A: front matter]                           [Document metrics]
+  [154 document records]                           [154 document records]
+       |                                               |
+       +-----------------------+-----------------------+
+             |
+             v
+      [Pass B: structural core, sampled full text]
+      [154 rows -> structural_core.csv]
+             |
+             v
+  +--------------------------------[full PDF text]--------------------------------+
+  |                                        |                                      |
+  v                                        v                                      v
+[Pass C: policy extractions]        [Pass D: instrument frames]             [Audit trail]
+[1,001 rows / 148 documents]        [770 rows = 154 x 5 frames]             [154 JSON files]
+-> recommendations.csv              -> frames.csv                            -> audit/*.json
+[full_policy_brief_text]            [full_policy_brief_text]
+[policy_extraction level]           [document_level_instrument_frame level]
+  |
+  | retain recommendation + policy_option parents only
+  v
+[AI segment pass: one LLM call per approved Pass C segment]
+[1,006 rows / 147 documents]
+-> recommendations_snippet_ai.csv
+[ai_extracted_recommendation_segment]
+[recommendation_segment level]
+  |
+  +------------------------------+
+               |
+               v
+        [Cross-validation and Pass 1 / Pass 2 context comparison]
+        [AI segments: 1,006 rows / 147 documents]
+        [Raw manual segments: 1,333 rows / 106 documents]
+               |
+               v
+       [comparison.csv: 152 documents]  [crosstab.csv: 28 rows]
+       [context_comparison.csv: 1,006 matched pairs]  [metrics.json]
+
+[Raw manual-coded segments: PBs solutions coded segments.xlsx]
+[1,333 rows / 106 documents]
+       |
+       v
+[Manual segment pass: one LLM call per coded segment]
+[2,023 rows / 105 documents]
+-> recommendations_snippet_manual.csv
+[manually_coded_recommendation_segment]
+[recommendation_segment level]
+       |
+       +---- retained as a provenance-labelled reporting source
+
+[documents.csv + structural_core.csv + recommendations.csv + frames.csv]
+[AI and manual segment outputs + cross-validation outputs]
+       |
+       v
+[results.ipynb and exploratory_analysis.ipynb]
+       |
+       v
+[reporting CSVs, figures, executed notebooks, rendered HTML]
+```
+
+Document-level instrument frames and recommendation-/segment-level
+``instrument_type`` values are preserved as separate analytical outputs.
+
 ## Quick Start
 
 ### Installation

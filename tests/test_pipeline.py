@@ -168,6 +168,34 @@ class TestOutputFiles:
         pipeline._generate_output_files(results)
         assert (pipeline.output_dir / "recommendations.csv").exists()
 
+    def test_recommendation_and_frame_output_provenance(self, pipeline):
+        import pandas as pd
+        result = self._make_result()
+        result.policy_extractions = [PolicyExtraction(
+            rec_id="test_doc_rec_001",
+            extraction_type="trade_off",
+            confidence=0.8,
+            source_text_raw="Government should act on forest monitoring.",
+            page=1,
+        )]
+        result.frame_assessments = [FrameAssessment(
+            frame_id="command_and_control",
+            frame_label="Command-and-Control",
+            decision=FrameDecision.ABSENT,
+            confidence=0.1,
+            rationale="No legal mechanism found.",
+        )]
+        results = [result]
+        pipeline._generate_output_files(results)
+
+        recommendations = pd.read_csv(pipeline.output_dir / "recommendations.csv")
+        frames = pd.read_csv(pipeline.output_dir / "frames.csv")
+
+        assert {"source_provenance", "analysis_level"}.issubset(recommendations.columns)
+        assert {"source_provenance", "analysis_level"}.issubset(frames.columns)
+        assert recommendations.iloc[0]["source_provenance"] == "full_policy_brief_text"
+        assert frames.iloc[0]["analysis_level"] == "document_level_instrument_frame"
+
     def test_structural_core_csv_created(self, pipeline):
         results = [self._make_result()]
         pipeline._generate_output_files(results)

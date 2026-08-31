@@ -310,7 +310,7 @@ def run_snippet_analysis(
     "--manual-snippet-file",
     required=True,
     type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
-    help="Path to recommendations_snippet_manual.csv",
+    help="Path to raw manually coded recommendation segments (.xlsx or .xls)",
 )
 @click.option(
     "--output-dir",
@@ -354,10 +354,10 @@ def validate(
     full_recs_file: Optional[Path],
     verbose: bool,
 ) -> None:
-    """Cross-validate AI snippet extractions against manual snippet extractions.
+    """Cross-validate AI recommendation-segment extractions against raw manual segments.
 
-    Primary comparison: recommendations_snippet_ai.csv vs
-    recommendations_snippet_manual.csv (presence, counts, extraction types).
+    Primary comparison: provenance-labelled recommendations_snippet_ai.csv vs
+    a raw manually coded segment workbook (presence, counts, extraction types).
 
     Optional secondary comparison against PB-level corpus indicators when
     --corpus-file is provided.

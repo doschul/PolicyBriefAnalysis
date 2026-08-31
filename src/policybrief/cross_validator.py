@@ -42,6 +42,9 @@ _DEFAULT_CORPUS_COLUMN_MAP: Dict[str, str] = {
     "has_photo": "Photo",
 }
 
+_AI_SNIPPET_PROVENANCE = "ai_extracted_recommendation_segment"
+_MANUAL_SEGMENT_PROVENANCE = "manually_coded_recommendation_segment"
+
 
 class CrossValidator:
     """Compare snippet-level AI and manual extraction outputs.
@@ -87,8 +90,9 @@ class CrossValidator:
             - ``.xlsx`` / ``.xls``: spreadsheet with columns ``Document name``,
               ``Solution type``, ``Segment`` (e.g. ``PBs solutions coded
               segments.xlsx``).
-            - ``.csv``: ``recommendations_snippet_manual.csv`` in the same schema
-              as the AI snippet output.
+
+                            Validation requires raw manually coded segments, rather than a
+                            further LLM-processed manual snippet output.
         output_dir:
             Directory where ``comparison.csv``, ``crosstab.csv``, and
             ``metrics.json`` are written.
@@ -112,14 +116,16 @@ class CrossValidator:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         ai_df = pd.read_csv(ai_snippet_path)
+        self._validate_ai_snippet_source(ai_df, ai_snippet_path)
 
-        # Load manual data — xlsx (Document name / Solution type / Segment)
-        # or a CSV in the same schema as the AI snippet output
+        # Validation ground truth is the raw manually coded segment file.
         manual_path = Path(manual_snippet_path)
-        if manual_path.suffix.lower() in (".xlsx", ".xls"):
-            manual_df = self._load_manual_xlsx(manual_path)
-        else:
-            manual_df = pd.read_csv(manual_path)
+        if manual_path.suffix.lower() not in (".xlsx", ".xls"):
+            raise ValueError(
+                "Cross-validation requires a raw manually coded .xlsx or .xls "
+                "segment file, not a processed manual snippet CSV."
+            )
+        manual_df = self._load_manual_xlsx(manual_path)
 
         ai_agg = self._aggregate_snippets(ai_df, prefix="ai")
         manual_agg = self._aggregate_snippets(manual_df, prefix="manual")
@@ -133,6 +139,8 @@ class CrossValidator:
         merged["presence_agree"] = (
             merged["ai_has_solutions"] == merged["manual_has_solutions"]
         )
+        merged["ai_source_provenance"] = _AI_SNIPPET_PROVENANCE
+        merged["manual_source_provenance"] = _MANUAL_SEGMENT_PROVENANCE
         merged["type_agree"] = merged.apply(
             lambda r: (
                 str(r["ai_dominant_type"]).lower() == str(r["manual_dominant_type"]).lower()
@@ -164,6 +172,16 @@ class CrossValidator:
         save_dataframe(merged, output_dir / "comparison.csv")
 
         metrics = self._compute_metrics(merged, ai_df=ai_df, manual_df=manual_df, sim_threshold=sim_threshold)
+        metrics["validation_inputs"] = {
+            "ai": {
+                "provenance": _AI_SNIPPET_PROVENANCE,
+                "documents": int(ai_df["doc_id"].nunique()),
+            },
+            "manual": {
+                "provenance": _MANUAL_SEGMENT_PROVENANCE,
+                "documents": int(manual_df["doc_id"].nunique()),
+            },
+        }
 
         # Optional Pass 1 vs Pass 2 context comparison
         if full_recs_path is not None:
@@ -184,6 +202,26 @@ class CrossValidator:
         return metrics
 
     # ── Internal helpers ──────────────────────────────────────────────
+
+    @staticmethod
+    def _validate_ai_snippet_source(ai_df: pd.DataFrame, path: Path) -> None:
+        """Require AI input to be provenance-labelled recommendation segments."""
+        required = {"doc_id", "source_provenance", "analysis_level"}
+        missing = required - set(ai_df.columns)
+        if missing:
+            raise ValueError(
+                f"AI snippet file {path} is missing required provenance column(s): "
+                f"{sorted(missing)}"
+            )
+        if not ai_df["source_provenance"].eq(_AI_SNIPPET_PROVENANCE).all():
+            raise ValueError(
+                "AI snippet file must contain only "
+                f"source_provenance='{_AI_SNIPPET_PROVENANCE}'."
+            )
+        if not ai_df["analysis_level"].eq("recommendation_segment").all():
+            raise ValueError(
+                "AI snippet file must contain only recommendation-segment analysis rows."
+            )
 
     def _aggregate_snippets(
         self, df: pd.DataFrame, prefix: str

@@ -77,6 +77,27 @@ class TestSnippetAnalyzerAI:
         assert df.iloc[0]["doc_id"] == "doc1"
         assert df.iloc[0]["parent_id"] == "doc1_rec_001"
         assert df.iloc[0]["input_source"] == "ai"
+        assert df.iloc[0]["source_provenance"] == "ai_extracted_recommendation_segment"
+        assert df.iloc[0]["analysis_level"] == "recommendation_segment"
+
+    def test_ai_non_recommendation_rows_are_excluded(self, tmp_path):
+        recs_csv = tmp_path / "recommendations.csv"
+        _write_recs_csv(recs_csv, [
+            {"rec_id": "doc1_rec_001", "doc_id": "doc1",
+             "source_text_raw": "Governments should strengthen forest monitoring systems.",
+             "page": 1, "extraction_type": "recommendation"},
+            {"rec_id": "doc1_rec_002", "doc_id": "doc1",
+             "source_text_raw": "This outcome names a government actor.",
+             "page": 1, "extraction_type": "expected_outcome"},
+            {"rec_id": "doc1_rec_003", "doc_id": "doc1",
+             "source_text_raw": "This trade-off names a ministry actor.",
+             "page": 1, "extraction_type": "trade_off"},
+        ])
+
+        analyzer = SnippetAnalyzer(llm_client=FakeLLMSnippetRec(), config={})
+        result = analyzer.analyze(recs_csv, tmp_path, input_source="ai")
+
+        assert set(result["parent_id"]) == {"doc1_rec_001"}
 
     def test_ai_empty_source_text_skipped(self, tmp_path):
         recs_csv = tmp_path / "recommendations.csv"
