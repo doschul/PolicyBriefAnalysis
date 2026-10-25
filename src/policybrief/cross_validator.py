@@ -36,6 +36,8 @@ _DEFAULT_CORPUS_COLUMN_MAP: Dict[str, str] = {
     "pdf_title": "Related File Pdf Title",
     "solutions_present": "Solutions component present",
     "solution_type": "Solution type (cf. analytical framework)",
+    "problem_present": "Problem component present",
+    "implementation_present": "Implementation considerations component present",
     "has_chart": "Chart",
     "has_table": "Table",
     "has_figure": "Figure",
@@ -44,6 +46,10 @@ _DEFAULT_CORPUS_COLUMN_MAP: Dict[str, str] = {
 
 _AI_SNIPPET_PROVENANCE = "ai_extracted_recommendation_segment"
 _MANUAL_SEGMENT_PROVENANCE = "manually_coded_recommendation_segment"
+
+# Sheet within Policy Briefs corpus.csv.xlsx that holds the per-document coding
+# (the workbook has several other sheets; this is not the first one)
+_CORPUS_SHEET_NAME = "Final Policy Brief List "
 
 
 class CrossValidator:
@@ -253,11 +259,17 @@ class CrossValidator:
     ) -> pd.DataFrame:
         """Attach PB-level corpus columns for secondary comparison."""
         suffix = self.corpus_path.suffix.lower()  # type: ignore[union-attr]
-        corpus = (
-            pd.read_excel(self.corpus_path)
-            if suffix in (".xlsx", ".xls")
-            else pd.read_csv(self.corpus_path)
-        )
+        if suffix in (".xlsx", ".xls"):
+            try:
+                corpus = pd.read_excel(self.corpus_path, sheet_name=_CORPUS_SHEET_NAME)
+            except ValueError:
+                logger.warning(
+                    f"Sheet '{_CORPUS_SHEET_NAME}' not found in {self.corpus_path}; "
+                    "falling back to the first sheet."
+                )
+                corpus = pd.read_excel(self.corpus_path)
+        else:
+            corpus = pd.read_csv(self.corpus_path)
         pdf_col = self.column_map["pdf_title"]
         if pdf_col not in corpus.columns:
             logger.warning(
@@ -270,12 +282,22 @@ class CrossValidator:
             lambda x: create_document_id(Path(str(x))) if pd.notna(x) else None
         )
         corpus = corpus.dropna(subset=["doc_id"])
+        # A handful of titles map to the same doc_id (e.g. re-listed briefs); keep the first entry.
+        corpus = corpus.drop_duplicates(subset="doc_id", keep="first")
 
-        keep_cols = ["doc_id", self.column_map["solutions_present"], self.column_map["solution_type"]]
+        keep_cols = [
+            "doc_id",
+            self.column_map["solutions_present"],
+            self.column_map["solution_type"],
+            self.column_map["problem_present"],
+            self.column_map["implementation_present"],
+        ]
         corpus_sub = corpus[[c for c in keep_cols if c in corpus.columns]].copy()
         corpus_sub = corpus_sub.rename(columns={
             self.column_map["solutions_present"]: "corpus_solutions_present",
             self.column_map["solution_type"]: "corpus_solution_type",
+            self.column_map["problem_present"]: "corpus_problem_present",
+            self.column_map["implementation_present"]: "corpus_implementation_present",
         })
         merged = merged.merge(corpus_sub, on="doc_id", how="left")
 

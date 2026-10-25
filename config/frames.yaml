@@ -366,3 +366,51 @@ frames:
       Phrases like "studies show" or "research indicates" are background,
       not an information strategy unless the document explicitly proposes
       using research as a policy instrument.
+
+  # ------------------------------------------------------------------
+  # 6. Other
+  # ------------------------------------------------------------------
+  - id: "other"
+    label: "Other"
+    short_definition: >-
+      A policy instrument that is clearly discussed as a governance
+      mechanism but does not fit any of the five predefined categories
+      above (command-and-control, economic instruments, self-regulation,
+      voluntarism, information strategies).
+    analytical_notes: >-
+      Use this category only when the document clearly proposes or
+      describes a concrete policy instrument (not a generic goal or
+      aspiration) whose behavioural driver does not match legal
+      compulsion, financial incentive, collective industry standards,
+      unilateral commitment, or information provision.  Examples include
+      institutional/organisational instruments (e.g. creating a new
+      coordinating body), planning instruments (e.g. spatial or land-use
+      planning mandates that are not primarily regulatory), or
+      capacity-building instruments not driven by information provision.
+      Do not use "Other" for vague statements lacking a concrete
+      instrument — in that case the correct decision is "absent".
+    inclusion_cues:
+      - "institutional arrangement"
+      - "coordinating body"
+      - "governance structure"
+      - "spatial planning"
+      - "land-use planning"
+      - "capacity building"
+      - "multi-stakeholder platform"
+      - "new agency"
+      - "cross-sectoral coordination"
+    exclusion_cues:
+      - "legally binding"
+      - "subsidy"
+      - "certification"
+      - "voluntary pledge"
+      - "transparency"
+    must_have: []
+    positive_examples:
+      - "A new cross-sectoral coordinating body was established to align forest and agricultural planning."
+      - "The reform introduces a dedicated land-use planning instrument outside the existing regulatory system."
+    false_positive_notes: >-
+      Do not classify under "Other" if the instrument actually fits one
+      of the five predefined categories — check those definitions first.
+      Do not use "Other" merely because a passage is hard to classify;
+      only use it when a concrete, distinct instrument is clearly present.

@@ -159,6 +159,22 @@ class DocumentFrontMatter(BaseModel):
         default=None,
         description="True if document text contains explicit references to figures, tables, charts, or photos",
     )
+    has_chart: Optional[bool] = Field(
+        default=None,
+        description="True if the document text contains an explicit reference to a chart or graph",
+    )
+    has_table: Optional[bool] = Field(
+        default=None,
+        description="True if the document text contains an explicit reference to a table",
+    )
+    has_figure: Optional[bool] = Field(
+        default=None,
+        description="True if the document text contains an explicit reference to a figure (e.g. 'Figure 1', 'Fig.')",
+    )
+    has_photo: Optional[bool] = Field(
+        default=None,
+        description="True if the document text contains an explicit reference to a photo/photograph",
+    )
 
     @model_validator(mode="after")
     def align_affiliation_type(self):

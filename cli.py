@@ -30,6 +30,7 @@ except ImportError:
 
 from src.policybrief.pipeline import PolicyBriefPipeline
 from src.policybrief.snippet_analysis import SnippetAnalyzer
+from src.policybrief.solution_frame_analysis import SolutionFrameAnalyzer
 from src.policybrief.cross_validator import CrossValidator
 
 
@@ -297,6 +298,71 @@ def run_snippet_analysis(
         else "recommendations_snippet_manual.csv"
     )
     logger.info(f"Done. {len(result_df)} snippet extractions written to {output_dir / out_name}")
+
+
+@cli.command(name="classify-solution-frames")
+@click.option(
+    "--source-file",
+    required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="AI or human recommendation-segment CSV.",
+)
+@click.option(
+    "--input-source",
+    type=click.Choice(["ai", "manual"], case_sensitive=False),
+    required=True,
+)
+@click.option(
+    "--output-dir",
+    required=True,
+    type=click.Path(file_okay=False, dir_okay=True, path_type=Path),
+)
+@click.option(
+    "--config",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+)
+@click.option("--max-workers", type=click.IntRange(min=1, max=8), default=1, show_default=True)
+@click.option("--checkpoint-every", type=click.IntRange(min=1), default=25, show_default=True)
+@click.option("--verbose", "-v", is_flag=True)
+def classify_solution_frames(
+    source_file: Path,
+    input_source: str,
+    output_dir: Path,
+    config: Path,
+    max_workers: int,
+    checkpoint_every: int,
+    verbose: bool,
+) -> None:
+    """Classify existing solution passages against policy-instrument frames."""
+    setup_logging(verbose)
+    from src.policybrief.llm_client import LLMClient
+    from src.policybrief.utils import get_env_var, load_yaml_config
+
+    cfg = load_yaml_config(config / "config.yaml")
+    frames_cfg = load_yaml_config(config / "frames.yaml")
+    oai_cfg = cfg.get("openai", {})
+    llm = LLMClient(
+        api_key=get_env_var("OPENAI_API_KEY", required=True),
+        model=oai_cfg.get("model", "gpt-4o-mini"),
+        temperature=oai_cfg.get("temperature", 0.1),
+        max_tokens=oai_cfg.get("max_tokens", 4000),
+        timeout=oai_cfg.get("timeout", 60),
+        max_retries=oai_cfg.get("max_retries", 5),
+        retry_delay=oai_cfg.get("retry_delay", 2.0),
+    )
+    analyzer = SolutionFrameAnalyzer(llm, frames_cfg.get("frames", []))
+    result = analyzer.analyze(
+        source_file,
+        output_dir,
+        input_source.lower(),
+        max_workers=max_workers,
+        checkpoint_every=checkpoint_every,
+    )
+    click.echo(
+        f"Wrote {len(result)} frame records to "
+        f"{output_dir / f'solution_frames_{input_source.lower()}.csv'}"
+    )
 
 
 @cli.command()

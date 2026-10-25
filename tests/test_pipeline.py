@@ -229,6 +229,16 @@ class TestOutputFiles:
         df = pd.read_csv(pipeline.output_dir / "documents.csv")
         assert df.iloc[0]["funding_statement_present"] is False or df.iloc[0]["funding_statement_present"] == False
 
+    def test_linked_studies_exported(self, pipeline):
+        """Linked-study presence and raw references are exported to documents CSV."""
+        import pandas as pd
+        result = self._make_result()
+        result.front_matter.linked_studies = ["Full technical report, 2024"]
+        pipeline._generate_output_files([result])
+        df = pd.read_csv(pipeline.output_dir / "documents.csv")
+        assert df.iloc[0]["linked_study_present"] is True or df.iloc[0]["linked_study_present"] == True
+        assert "Full technical report" in str(df.iloc[0]["linked_studies_raw"])
+
     def test_structural_core_csv_content(self, pipeline):
         import pandas as pd
         results = [self._make_result()]

@@ -61,6 +61,10 @@ Return JSON with exactly these fields:
 - linked_studies: list of referenced study names/IDs (empty list if none)
 - affiliation_type: list of category labels for each affiliation, aligned position-for-position with affiliations (empty list if none)
 - has_visual_elements: true if the text contains explicit references to figures, tables, charts, or photos; false otherwise
+- has_chart: true if the text contains an explicit reference to a chart or graph; false otherwise
+- has_table: true if the text contains an explicit reference to a table; false otherwise
+- has_figure: true if the text contains an explicit reference to a figure (e.g. "Figure 1", "Fig."); false otherwise
+- has_photo: true if the text contains an explicit reference to a photo/photograph; false otherwise
 
 Rules:
 - Extract information from the actual document text, not from PDF metadata.
@@ -74,7 +78,8 @@ Rules:
 - Do NOT include ordinary bibliography entries, generic citations, or literature references as linked_studies.
 - Emails and URLs must be explicitly present in the text; do not construct or infer them.
 - For each affiliation, classify it into exactly one of: Research Institute, University, Intergovernmental Organization, NGO, Private Company, Other. The affiliation_type list must be the same length as affiliations. Use "Other" when uncertain.
-- has_visual_elements must be based ONLY on explicit textual mentions such as "Figure", "Fig.", "Table", "Chart", "Graph", "Photo", or similar caption patterns. Do not infer from context."""
+- has_visual_elements must be based ONLY on explicit textual mentions such as "Figure", "Fig.", "Table", "Chart", "Graph", "Photo", or similar caption patterns. Do not infer from context.
+- has_chart, has_table, has_figure, and has_photo must each be assessed independently from the same explicit textual mentions; a document can have any combination of these be true or false."""
 
 STRUCTURAL_CORE_PROMPT = """Analyze the structural components of this policy document.
 
@@ -499,12 +504,24 @@ class PolicyBriefPipeline:
                 row["fm_urls"] = "; ".join(r.front_matter.urls)
                 row["funding_statement_present"] = len(r.front_matter.funding_statements) > 0
                 row["funding_statements_raw"] = "; ".join(r.front_matter.funding_statements) if r.front_matter.funding_statements else None
+                row["linked_study_present"] = len(r.front_matter.linked_studies) > 0
+                row["linked_studies_raw"] = "; ".join(r.front_matter.linked_studies) if r.front_matter.linked_studies else None
                 row["fm_affiliation_types"] = "; ".join(r.front_matter.affiliation_type) if r.front_matter.affiliation_type else None
                 row["has_visual_elements"] = r.front_matter.has_visual_elements
+                row["has_chart"] = r.front_matter.has_chart
+                row["has_table"] = r.front_matter.has_table
+                row["has_figure"] = r.front_matter.has_figure
+                row["has_photo"] = r.front_matter.has_photo
             else:
                 row["funding_statement_present"] = None
                 row["funding_statements_raw"] = None
+                row["linked_study_present"] = None
+                row["linked_studies_raw"] = None
                 row["has_visual_elements"] = None
+                row["has_chart"] = None
+                row["has_table"] = None
+                row["has_figure"] = None
+                row["has_photo"] = None
             # Metrics
             for k, v in r.metrics.model_dump().items():
                 row[k] = v

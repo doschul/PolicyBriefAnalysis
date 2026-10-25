@@ -10,16 +10,14 @@ The pipeline processes PDF policy briefs through four LLM passes, bookended by d
 2. **Pass A: Front-matter** — title, authors, affiliations, funding via LLM (first 3 + last page)
 3. **Pass B: Structural core** — problem statement, solutions, implementation, narrative hook via LLM (sampled pages)
 4. **Pass C: Recommendations** — broad-content LLM extraction over page-window chunks, then deduplication
-5. **Pass D: Frames** — all five policy-instrument frames assessed in a single LLM call per chunk
+5. **Pass D: Frames** — all six configured policy-instrument frames assessed in a single LLM call per chunk
 
 Deterministic rails handle PDF parsing, metrics, reference-boundary exclusion, evidence verification, normalization, deduplication, and output generation. Each stage is independently toggleable. If any stage fails at runtime, the pipeline logs a warning and continues (graceful degradation).
 
 ### Current End-to-End Workflow
 
-The observation counts below are from the current full-corpus run (154 PDFs).
-
 ```text
-[154 policy-brief PDFs: data/policy_briefs_arthur]
+[Policy-brief PDFs: data/]
        |
        v
        [PDF text + metadata extraction]
@@ -28,20 +26,19 @@ The observation counts below are from the current full-corpus run (154 PDFs).
        |                                               |
        v                                               v
   [Pass A: front matter]                           [Document metrics]
-  [154 document records]                           [154 document records]
+  [one document record per processed PDF]          [one document record per processed PDF]
        |                                               |
        +-----------------------+-----------------------+
              |
              v
       [Pass B: structural core, sampled full text]
-      [154 rows -> structural_core.csv]
+      [structural_core.csv]
              |
              v
   +--------------------------------[full PDF text]--------------------------------+
   |                                        |                                      |
   v                                        v                                      v
 [Pass C: policy extractions]        [Pass D: instrument frames]             [Audit trail]
-[1,001 rows / 148 documents]        [770 rows = 154 x 5 frames]             [154 JSON files]
 -> recommendations.csv              -> frames.csv                            -> audit/*.json
 [full_policy_brief_text]            [full_policy_brief_text]
 [policy_extraction level]           [document_level_instrument_frame level]
@@ -49,7 +46,6 @@ The observation counts below are from the current full-corpus run (154 PDFs).
   | retain recommendation + policy_option parents only
   v
 [AI segment pass: one LLM call per approved Pass C segment]
-[1,006 rows / 147 documents]
 -> recommendations_snippet_ai.csv
 [ai_extracted_recommendation_segment]
 [recommendation_segment level]
@@ -57,20 +53,14 @@ The observation counts below are from the current full-corpus run (154 PDFs).
   +------------------------------+
                |
                v
-        [Cross-validation and Pass 1 / Pass 2 context comparison]
-        [AI segments: 1,006 rows / 147 documents]
-        [Raw manual segments: 1,333 rows / 106 documents]
+        [AI and manual sources remain separately identified]
                |
-               v
-       [comparison.csv: 152 documents]  [crosstab.csv: 28 rows]
-       [context_comparison.csv: 1,006 matched pairs]  [metrics.json]
+               +----> [Cross-validation and context comparison]
 
-[Raw manual-coded segments: PBs solutions coded segments.xlsx]
-[1,333 rows / 106 documents]
-       |
+[Human-coded segments: PBs solutions coded segments.xlsx]
+       |                    [independent input from the AI Pass C results]
        v
-[Manual segment pass: one LLM call per coded segment]
-[2,023 rows / 105 documents]
+[Manual segment pass: one LLM call per non-empty coded segment]
 -> recommendations_snippet_manual.csv
 [manually_coded_recommendation_segment]
 [recommendation_segment level]
@@ -87,8 +77,13 @@ The observation counts below are from the current full-corpus run (154 PDFs).
 [reporting CSVs, figures, executed notebooks, rendered HTML]
 ```
 
+AI snippet inputs come from recommendation and policy-option rows in
+`recommendations.csv`; manual snippet inputs come directly from non-empty
+`Segment` cells in `PBs solutions coded segments.xlsx`. The AI snippet pass is
+not seeded from the human-coded segments. A single input passage can produce
+multiple extracted records, so output row counts are not passage counts.
 Document-level instrument frames and recommendation-/segment-level
-``instrument_type`` values are preserved as separate analytical outputs.
+`instrument_type` values are preserved as separate analytical outputs.
 
 ## Quick Start
 
@@ -127,6 +122,25 @@ python cli.py extract --input_dir ./data/policy_briefs --output_dir ./output --c
 python cli.py validate-config --config ./config
 ```
 
+### Solution-level instrument frames
+
+Classify AI-extracted and human-coded recommendation/policy-option segments
+against the six instrument frames. Each command writes a separate resumable
+dataset and leaves the existing segment and document-level frame outputs
+unchanged. Concurrency defaults to one worker; increase it cautiously to manage
+API rate limits.
+
+```bash
+python cli.py classify-solution-frames --source-file ./output/recommendations_snippet_ai.csv --input-source ai --output-dir ./output --config ./config
+python cli.py classify-solution-frames --source-file ./output/recommendations_snippet_manual.csv --input-source manual --output-dir ./output --config ./config
+```
+
+Outputs are `solution_frames_ai.csv` and `solution_frames_manual.csv`. Use
+`--max-workers 2` (up to 8) for bounded parallel processing and
+`--checkpoint-every 25` to control checkpoint frequency. These commands make
+LLM API calls; reruns skip passages that are already fully classified and retry
+failed passages.
+
 ### Programmatic usage
 
 ```python
@@ -160,7 +174,7 @@ PyMuPDF (fitz), pypdf, pandas, pyarrow, click, pyyaml, openai, pydantic, tenacit
 
 ```
 PolicyBriefAnalysis/
-├── cli.py                          # Click CLI (extract, validate-config)
+├── cli.py                          # Click CLI (extract, validate-config, solution-frame classification)
 ├── config/
 │   ├── config.yaml                 # Pipeline settings and module switches
 │   ├── frames.yaml                 # Policy-instrument frame definitions
@@ -170,11 +184,12 @@ PolicyBriefAnalysis/
 │   ├── pdf_extractor.py            # PDF text/metadata extraction (PyMuPDF + pypdf fallback)
 │   ├── recommendation_extractor.py # Pass C — broad-content recommendation extraction + dedup
 │   ├── frame_detector.py           # Pass D — all-frames-at-once chunk-based detection
+│   ├── solution_frame_analysis.py  # Additive solution-level frame classification
 │   ├── llm_client.py               # OpenAI client with schema patching and retry
 │   ├── metrics_calculator.py       # Document metrics (readability, structure)
 │   ├── models.py                   # Pydantic V2 data models and enums
 │   └── utils.py                    # Shared helpers (I/O, config, text cleaning)
-├── tests/                          # pytest suite (127 tests)
+├── tests/                          # pytest suite
 └── output/                         # Generated outputs
     ├── documents.csv
     ├── frames.csv
@@ -242,11 +257,11 @@ Broad-content LLM extraction replaces the previous sentence-level prescriptive-c
 
 ### 5. Pass D — Frame Detection (`frame_detector.py`)
 
-Classifies each document against five policy-instrument categories in a single LLM call per chunk — replacing the previous keyword-prefilter + per-frame call approach.
+Classifies each document against the configured policy-instrument frames in a single LLM call per chunk — replacing the previous keyword-prefilter + per-frame call approach.
 
 **All-frames-at-once assessment**:
 - Builds `DocumentContent` from all pages, splits into chunks (≤ 30,000 chars)
-- Each chunk is sent to the LLM with all five frame definitions and classification criteria
+- Each chunk is sent to the LLM with all configured frame definitions and classification criteria
 - The LLM returns a structured response assessing every frame simultaneously
 - Multi-chunk results are aggregated: the highest-confidence result per frame wins
 
@@ -265,6 +280,7 @@ Classifies each document against five policy-instrument categories in a single L
 | Self-Regulation | Collective industry norms, certification schemes, standards |
 | Voluntarism | Unilateral non-binding commitments by individual firms |
 | Information Strategies | Transparency, disclosure, monitoring, traceability |
+| Other | Governance mechanisms that do not fit the five predefined categories |
 
 Each frame definition includes analytical notes, positive examples, and false-positive guidance.
 
@@ -282,7 +298,22 @@ Computes per-document metrics:
 
 ## Output Format
 
-The pipeline produces four CSV output tables and per-document audit files.
+The core pipeline produces four CSV output tables and per-document audit files.
+Snippet analysis and solution-level frame classification produce additional
+source-labelled CSV outputs.
+
+### Snippet analysis and solution-level frames
+
+`run-snippet-analysis` writes `recommendations_snippet_ai.csv` or
+`recommendations_snippet_manual.csv`, depending on the input source. The AI
+input is `recommendations.csv`; the manual input is the coded-segments
+workbook. These are separate provenance paths, not a shared set of passages.
+LLM extraction may return more than one record for an input passage.
+
+`classify-solution-frames` writes `solution_frames_ai.csv` or
+`solution_frames_manual.csv`, plus document-level and co-occurrence summaries.
+It classifies the solution snippets against the six solution-level instrument
+frames. These outputs supplement rather than replace `frames.csv`.
 
 ### `documents.csv`
 
@@ -299,7 +330,7 @@ One row per document. Contains PDF metadata, front-matter fields, metrics, and s
 
 ### `frames.csv`
 
-One row per document × frame (5 rows per document by default).
+One row per document × configured frame.
 
 | Column | Description |
 |---|---|
@@ -365,6 +396,18 @@ Per-document JSON file containing the complete extraction record:
 - All recommendation extractions with classification detail
 - Processing status, warnings, and timing
 
+### Repository and generated-data hygiene
+
+The `data/` directory is ignored because it contains source PDFs and workbooks;
+keep those inputs in a backed-up, access-controlled location rather than
+removing them as cleanup. Files under `output/` are generated analysis
+artifacts. Retain the outputs needed for reporting or reproducibility, and
+review run-specific exports, archives, and logs before committing them.
+
+Local caches and scratch data such as `.venv/`, `.ruff_cache/`,
+`.pytest_cache/`, `__pycache__/`, and `temp/` can be regenerated and should not
+be committed. Remove them only when they are not in active use.
+
 ## Configuration
 
 ### Module Switches (`config/config.yaml`)
@@ -428,7 +471,7 @@ The pipeline uses OpenAI's structured output mode (JSON schema) to enforce type-
 | A — Front-matter | 1 | First 3 pages + last page (≤ 8K chars) |
 | B — Structural core | 1 | Sampled pages: first 5 + middle + last 3 (≤ 10K chars) |
 | C — Recommendations | 1 per chunk | Page-window chunks (≤ 30K chars each) |
-| D — Frames | 1 per chunk | Page-window chunks (≤ 30K chars each), all 5 frames at once |
+| D — Frames | 1 per chunk | Page-window chunks (≤ 30K chars each), all 6 configured frames at once |
 
 A typical 20-page policy brief generates ~6 API calls (2 fixed + ~2 recommendation chunks + ~2 frame chunks). Short briefs (< 30K chars) need only 4 calls total.
 
@@ -438,10 +481,14 @@ A typical 20-page policy brief generates ~6 API calls (2 fixed + ~2 recommendati
 Usage: cli.py [OPTIONS] COMMAND [ARGS]...
 
 Commands:
-  extract          Process PDF policy briefs
-  validate-config  Validate configuration files
+  extract                    Process PDF policy briefs
+  validate-config            Validate configuration files
+  version                    Show version information
+  run-snippet-analysis       Create AI- or manual-source snippet outputs
+  classify-solution-frames  Classify snippets against solution-level frames
+  validate                  Run cross-validation
 
-Extract options:
+`extract` options:
   --input_dir PATH        Directory containing PDF files [required]
   --output_dir PATH       Output directory for results [required]
   --config PATH           Configuration directory [required]
@@ -449,6 +496,13 @@ Extract options:
   --force_reprocess       Ignore cache, reprocess all files
   --verbose / -v          Enable debug logging
   --dry_run               Show what would be processed without running
+
+`run-snippet-analysis` requires `--source-file`, `--output-dir`, and
+`--config`; select `--input-source ai|manual` (default: `ai`).
+`classify-solution-frames` requires the same options, including an explicit
+`--input-source`; `--max-workers` is limited to 1–8 and
+`--checkpoint-every` controls checkpoint frequency. These two commands make
+LLM API calls. Use `python cli.py COMMAND --help` for current command options.
 ```
 
 ## Testing
@@ -468,7 +522,7 @@ pytest tests/test_integration.py -v
 pytest tests/test_models.py -v
 ```
 
-The test suite includes 127 tests covering:
+The test suite covers:
 - Pydantic model validation and enum handling
 - Frame detection logic (chunk-based assessment, aggregation, policy-mix)
 - Recommendation extraction (reference detection, broad-content extraction, deduplication, evidence verification)

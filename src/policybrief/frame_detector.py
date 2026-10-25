@@ -41,6 +41,7 @@ Critical distinctions:
 - information_strategies vs generic citation: Information strategies must be presented as a GOVERNANCE MECHANISM (monitoring systems, transparency requirements, traceability tools used to influence behaviour) — not merely citing scientific studies or presenting data as background.
 - command_and_control requires LEGAL COMPULSION: binding rules, sanctions, permits, compliance obligations. General mentions of "governance" or "policy" are not sufficient.
 - economic_instruments require a specific FINANCIAL MECHANISM: PES, subsidies, credits, taxes. General statements about economic value are not economic instruments.
+- other: use this category ONLY when the document clearly discusses a concrete policy instrument that does not fit any of the other five categories (e.g. institutional/coordinating bodies, spatial/land-use planning mandates, capacity-building instruments). Do not use "other" for vague statements lacking a concrete instrument — mark it ABSENT instead.
 
 Rules:
 - Assess ALL frames independently. Multiple frames CAN co-occur in one document.
