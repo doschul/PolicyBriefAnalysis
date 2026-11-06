@@ -133,6 +133,7 @@ dmypy.json
 # Policy Brief Analysis Pipeline specific
 out/
 output/audit/
+output/figures/fig4b_actor_provenance_mix.*
 results/
 temp/
 *.log
